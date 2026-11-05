@@ -1,4 +1,4 @@
-<img align="right" width="220" alt="pg_smartvac mascot" src="images/pg_smartcheck_mascot.png" />
+<img align="right" width="220" alt="pg_smartcheck mascot" src="images/pg_smartcheck_mascot.png" />
 
 # pg_smartcheck
 
@@ -18,7 +18,7 @@ The goal is to give DBAs a consolidated view of potential database health and pe
 - The PostgreSQL `vacuumlo` utility available in the PostgreSQL binary directory for the orphaned large object check.
 - Database credentials supplied through `.pgpass`, the `PGPASSWORD` environment variable, or PostgreSQL/libpq authentication configuration.
 
-The utility supports Windows and Linux/POSIX environments. Some checks depend on operating system access or PostgreSQL version-specific statistics and may report `INFO` when they cannot be evaluated.
+The utility supports Windows and Linux. Certain operating-system-specific checks are available only on local POSIX systems. Some checks depend on operating system access or PostgreSQL version-specific statistics and may report `INFO` when they cannot be evaluated.
 
 ## History
 
@@ -63,7 +63,7 @@ The following checks are performed by `pg_smartcheck`.
 | Table bloat | Estimates table and associated TOAST space usage. Reports tables with estimated bloat greater than 30% and estimated excess space greater than 100 MB. |
 | Index bloat | Estimates B-tree index bloat. Reports indexes larger than 50 MB with estimated bloat greater than 30%. |
 | Maintenance candidates | Reviews table statistics, dead-tuple and modification ratios, maintenance history, and transaction ID age to identify tables that may warrant maintenance attention. This is diagnostic only and does not run maintenance. |
-| Replication | Checks replication status and lag, using the configured lag thresholds where applicable. |
+| Replication | Checks replication status and lag, using the built-in replication lag thresholds where applicable. |
 
 ### Important notes about the checks
 
@@ -105,7 +105,7 @@ Several checks use fixed thresholds in the current implementation.
 | Maximum connection utilization | 70% of usable connection capacity |
 | Active connections | 2.5 sessions per vCPU |
 | Cache hit ratio | Warning below 90% |
-| OS load | Warning above 90% of available CPU capacity |
+| OS load | Warning when load average exceeds 90% of the available CPU count |
 | Idle connection age | 240 minutes by default |
 | Idle connection recent activity | No activity in the previous 1 hour |
 | Data directory usage | Warning above 75% |
