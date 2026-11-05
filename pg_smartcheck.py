@@ -45,7 +45,6 @@
 # ==========         =========      ==============================
 # Michael Vitale     11/05/2026     Initial development, consolidating pg_report and pg_check.
 ###############################################################################
-
 import sys
 import os
 import ipaddress
