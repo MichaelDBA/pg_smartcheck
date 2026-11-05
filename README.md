@@ -226,12 +226,6 @@ python3 pg_smartcheck.py -d testing -b
 15 6 * * * /usr/bin/python3 /path/to/pg_smartcheck.py -d testing >> /var/log/pg_smartcheck.log 2>&1
 ```
 
-## Sample Output
-
-<img width="1689" height="299" alt="image" src="https://github.com/user-attachments/assets/12db6d6f-2203-407e-942c-4dafa5b4b24f" />
-
-
-
 Adjust the executable path, script path, database name, authentication configuration, and schedule for your environment.
 
 ## Design Philosophy
@@ -243,3 +237,10 @@ The checks are deliberately diagnostic. A warning is a starting point for invest
 ## Future Enhancements
 
 - Integrate PgBouncer monitoring using the retained `pgbouncer_pkg` functionality.
+
+## Sample Output
+
+<img width="1689" height="399" alt="image" src="https://github.com/user-attachments/assets/12db6d6f-2203-407e-942c-4dafa5b4b24f" />
+
+
+
