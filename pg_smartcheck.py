@@ -45,6 +45,7 @@
 # ==========         =========      ==============================
 # Michael Vitale     11/05/2026     Initial development, consolidating pg_report and pg_check.
 ###############################################################################
+
 import sys
 import os
 import ipaddress
@@ -1305,6 +1306,15 @@ class maint:
         else:
             result["status"] = "WARNING"
             result["message"] = "%d unused indexes were found." % unused_indexes_cnt
+
+            if self.verbose:
+                sql = "SELECT quote_ident(schemaname) || '.' || quote_ident(indexrelname) || ' on ' || quote_ident(schemaname) || '.' || quote_ident(relname) || ' (' || pg_size_pretty(pg_relation_size(indexrelid)) || ')' FROM pg_stat_user_indexes JOIN pg_index USING(indexrelid) WHERE idx_scan = 0 AND idx_tup_read = 0 AND idx_tup_fetch = 0 AND NOT indisprimary AND NOT indisunique AND NOT indisexclusion AND indisvalid AND indisready AND pg_relation_size(indexrelid) > 8192 ORDER BY schemaname, relname, indexrelname"
+
+                cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
+                rc, details = self.executecmd(cmd, False)
+
+                if rc == SUCCESS:
+                    result["details"] = details or ""
 
         return SUCCESS, result
 
