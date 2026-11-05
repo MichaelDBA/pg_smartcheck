@@ -14,8 +14,7 @@ output and detailed HTML reporting.
 
 (c) 2026 SQLEXEC LLC
 
-::: {style="clear: right;"}
-:::
+<div style="clear: right;"></div>
 
 ## Requirements
 
