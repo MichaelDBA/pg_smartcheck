@@ -34,8 +34,8 @@ The program reports each check with a status:
 
 - **OK**: The check completed and did not identify a condition that crossed its warning criteria.
 - **WARNING**: The check identified a condition that may require investigation.
-- **INFO**: Provides additional information.
-- **VERB**: Shows verbose information if **-v** is provided.
+- **INFO**: The check is informational, not applicable, or could not be evaluated in the current environment.
+- **VERB**: Additional verbose, diagnostic output displayed when `-v` is specified.
 
 Some checks are based on statistical estimates and heuristic thresholds. A warning should be treated as a diagnostic indicator, not as proof that a database problem exists. Review the accompanying details and workload context before taking action.
 
