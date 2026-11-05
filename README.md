@@ -240,7 +240,7 @@ The checks are deliberately diagnostic. A warning is a starting point for invest
 
 ## Sample Output
 
-<img width="1689" height="399" alt="image" src="https://github.com/user-attachments/assets/12db6d6f-2203-407e-942c-4dafa5b4b24f" />
+<img width="1689" height="599" alt="image" src="https://github.com/user-attachments/assets/12db6d6f-2203-407e-942c-4dafa5b4b24f" />
 
 
 
