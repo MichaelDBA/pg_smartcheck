@@ -2,15 +2,9 @@
 
 # pg_smartcheck
 
-`pg_smartcheck` is a comprehensive PostgreSQL database health analysis
-utility that evaluates database configuration, performance, activity,
-replication, storage, and maintenance conditions to identify potential
-problems and provide DBAs with operational insight.
+`pg_smartcheck` is a comprehensive PostgreSQL database health analysis and performance diagnostics utility. It examines database activity, configuration, connection usage, checkpoints, background writer behavior, indexes, large objects, disk usage, table and index bloat, maintenance indicators, and replication status.
 
-Unlike traditional monitoring scripts that focus on individual metrics
-or isolated alerts, `pg_smartcheck` consolidates a broad range of
-PostgreSQL health checks into a single utility, providing both console
-output and detailed HTML reporting.
+The goal is to give DBAs a consolidated view of potential database health and performance concerns, along with diagnostic details that help identify where further investigation may be warranted.
 
 (c) 2026 SQLEXEC LLC
 
@@ -18,355 +12,227 @@ output and detailed HTML reporting.
 
 ## Requirements
 
--   PostgreSQL 10 and later.
--   Python 3.
--   PostgreSQL `psql` client available in the user's PATH.
--   Database authentication through `.pgpass`, the `PGPASSWORD`
-    environment variable, or PostgreSQL authentication configuration.
+- PostgreSQL 10 or newer.
+- Python 3.
+- The PostgreSQL `psql` client available in the system `PATH`.
+- The PostgreSQL `vacuumlo` utility available in the PostgreSQL binary directory for the orphaned large object check.
+- Database credentials supplied through `.pgpass`, the `PGPASSWORD` environment variable, or PostgreSQL/libpq authentication configuration.
+
+The utility supports Windows and Linux/POSIX environments. Some checks depend on operating system access or PostgreSQL version-specific statistics and may report `INFO` when they cannot be evaluated.
 
 ## History
 
-The first version of this program was created in November 2026 by
-consolidating functionality from the existing `pg_report.py` and
-`pg_check.py` utilities.
+The first version of `pg_smartcheck` was created in November 2026 by consolidating functionality from the original `pg_report` and `pg_check` utilities.
 
 ## Overview
 
-`pg_smartcheck` performs a series of PostgreSQL health checks and
-reports conditions that may warrant further investigation.
+`pg_smartcheck` performs a series of read-only diagnostic checks against a PostgreSQL database. It uses the `psql` command-line client to collect PostgreSQL statistics and configuration information, and uses operating-system commands or filesystem information for checks that are available only when the database host is local.
 
-It evaluates database activity, connection utilization, query behavior,
-cache performance, checkpoint activity, background writer activity,
-replication health, storage utilization, table and index bloat, and
-maintenance candidates.
+The utility does not perform database maintenance. It does not execute `VACUUM`, `ANALYZE`, `FREEZE`, `REINDEX`, or other corrective operations. Its purpose is to identify conditions that may deserve attention and provide information to help a DBA decide what action, if any, is appropriate.
 
-The program runs on Windows and Linux and uses the PostgreSQL
-command-line client to retrieve database information.
+The program reports each check with a status:
 
-It supports console output and optional HTML reporting. The HTML report
-is written to the current working directory using the filename format:
+- **OK**: The check completed and did not identify a condition that crossed its warning criteria.
+- **WARNING**: The check identified a condition that may require investigation.
+- **INFO**: The check could not be evaluated in the current environment, is not applicable, or has information to report without raising a warning.
 
-`pg_smartcheck_YYYYMMDD_HHMM.html`
-
-Here are the parameters:
-
-  -----------------------------------------------------------------------
-  Parameter                           Description
-  ----------------------------------- -----------------------------------
-  `-h --dbhost`                       Database host name or IP address
-                                      (default: libpq default)
-
-  `-d --database`                     Database name (required)
-
-  `-U --dbuser`                       Database user (default: libpq
-                                      default)
-
-  `-p --port`                         Database port (default: 5432)
-
-  `-w --waitslocks`                   Wait/lock threshold in seconds
-                                      (default: disabled)
-
-  `-l --longquerymins`                Long-running query threshold in
-                                      minutes (default: disabled)
-
-  `-c --vcpus`                        Number of available CPUs (default:
-                                      not specified)
-
-  `-i --idleintransmins`              Idle-in-transaction threshold in
-                                      minutes (default: disabled)
-
-  `-o --idleconnmins`                 Idle connection threshold in
-                                      minutes (default: 240)
-
-  `--html`                            Generate an HTML report
-
-  `-v --verbose`                      Enable verbose output
-
-  `-b --debug`                        Enable debug output
-  -----------------------------------------------------------------------
-
-## Why pg_smartcheck?
-
-PostgreSQL provides extensive monitoring statistics and diagnostic
-information, but DBAs often need to examine multiple system views and
-configuration settings to develop a complete picture of database health.
-
-`pg_smartcheck` brings these diagnostics together into one utility. Key
-benefits include:
-
--   **Comprehensive health analysis:** Evaluates multiple aspects of
-    PostgreSQL database health through a single execution.
--   **Performance diagnostics:** Identifies long-running queries, waits,
-    connection pressure, cache performance, and checkpoint activity.
--   **Replication monitoring:** Evaluates streaming replication status,
-    WAL receiver activity, and potential replication lag.
--   **Storage analysis:** Identifies potential table and index bloat,
-    unused indexes, orphaned large objects, and filesystem utilization
-    issues.
--   **Maintenance visibility:** Identifies tables that may need VACUUM,
-    ANALYZE, or FREEZE attention.
--   **Operational awareness:** Examines database conflicts, deadlocks,
-    background writer activity, and connection age.
--   **Detailed reporting:** Provides console output and an HTML report
-    with expandable diagnostic details.
-
-`pg_smartcheck` is strictly a diagnostic and reporting utility. It does
-not execute VACUUM, ANALYZE, FREEZE, REINDEX, or other database
-maintenance operations. It identifies potential issues and provides
-information to help DBAs determine the appropriate response.
+Some checks are based on statistical estimates and heuristic thresholds. A warning should be treated as a diagnostic indicator, not as proof that a database problem exists. Review the accompanying details and workload context before taking action.
 
 ## Health Checks
 
-`pg_smartcheck` currently performs the following checks:
+The following checks are performed by `pg_smartcheck`.
 
-  -----------------------------------------------------------------------
-  Check                               Description
-  ----------------------------------- -----------------------------------
-  Waits and locks                     Identifies active queries waiting
-                                      on database resources and reports
-                                      blocking relationships.
+| Check | Description |
+|---|---|
+| Waits and locks | Identifies active queries waiting on events, excluding `DataFileRead`, when their wait duration exceeds the configured threshold. Reports waiting query information and blocking relationships when available. |
+| Idle in transaction | Identifies sessions that have remained `idle in transaction` longer than the configured number of minutes. |
+| Idle connections | Identifies idle client connections that have remained inactive longer than the configured threshold. |
+| Long-running queries | Identifies non-idle queries running longer than the configured number of minutes. |
+| Operating system load | On a local POSIX host, compares the 1-, 5-, and 15-minute load averages with 90% of the available CPU count. |
+| Active connections | Compares active and idle-in-transaction sessions with a threshold of 2.5 sessions per vCPU. For remote databases, a vCPU count must be supplied. |
+| Maximum connections | Calculates client connection utilization against usable connection capacity, accounting for reserved connections. A warning is raised at 70% utilization or higher. |
+| Database conflicts and temporary files | Reports database conflicts, deadlocks, temporary file counts, and temporary bytes. Conflicts and deadlocks raise a warning; temporary file usage raises a warning when it exceeds 1 GB and there are no conflicts or deadlocks. |
+| Cache hit ratio | Reports the current database cache hit ratio and warns when it is below 90%. |
+| Checkpoints | Evaluates checkpoint frequency, requested versus timed checkpoints, checkpoint write pacing and synchronization time, WAL generation relative to `max_wal_size`, and current checkpointer/background-writer wait events where available. |
+| Background writer | Compares background-writer activity with client-backend writing. The implementation supports PostgreSQL 15 and PostgreSQL 18; other versions report this check as informational. |
+| Unused indexes | Identifies valid, ready, non-primary, non-unique, non-exclusion indexes larger than 8 KB that have no recorded scans or tuple activity. |
+| Idle connection age | Reports the number and average age of idle client connections, and identifies connections without activity in the previous hour. |
+| Orphaned large objects | Uses `vacuumlo` in dry-run mode to identify large objects that would be removed. It never removes large objects. This check is not available on standby servers. |
+| Data directory usage | On a local non-RDS host, reports filesystem usage for the PostgreSQL data directory and warns when usage exceeds 75%. |
+| Table bloat | Estimates table and associated TOAST space usage. Reports tables with estimated bloat greater than 30% and estimated excess space greater than 100 MB. |
+| Index bloat | Estimates B-tree index bloat. Reports indexes larger than 50 MB with estimated bloat greater than 30%. |
+| Maintenance candidates | Reviews table statistics, dead-tuple and modification ratios, maintenance history, and transaction ID age to identify tables that may warrant maintenance attention. This is diagnostic only and does not run maintenance. |
+| Replication | Checks replication status and lag, using the configured lag thresholds where applicable. |
 
-  Idle in transaction                 Identifies sessions that have
-                                      remained idle in transaction beyond
-                                      the configured threshold.
+### Important notes about the checks
 
-  Idle connections                    Identifies idle connections that
-                                      have exceeded the configured age
-                                      threshold.
+- **Local versus remote access:** Operating system load and data-directory filesystem usage require access to the PostgreSQL host. They are reported as `INFO` when the database is remote. RDS data-directory usage is not available through this check.
+- **CPU count:** The active connection check uses the detected CPU count for a local database host. For a remote database, specify `--vcpus` to enable this comparison. The operating system load check is available only on a local POSIX host.
+- **PostgreSQL version differences:** Some statistics moved between PostgreSQL system views in newer releases. The checkpoint check accounts for the PostgreSQL 17 change, while the background writer check currently has explicit support for PostgreSQL 15 and 18.
+- **Bloat estimates:** Table and index bloat calculations are estimates based on catalog statistics and page/tuple assumptions. They are useful for identifying candidates for closer inspection, but are not exact measurements of reclaimable disk space.
+- **Statistics reset:** PostgreSQL statistics are cumulative since their last reset. Interpret counters and rates with the corresponding statistics reset time in mind.
+- **Unused indexes:** An index with zero recorded scans is not automatically safe to drop. Consider application behavior, infrequent reporting, constraints, and the period covered by the statistics before making changes.
+- **Orphaned large objects:** The check invokes `vacuumlo` with its `-n` dry-run option. The utility only reports what `vacuumlo` would remove.
 
-  Long-running queries                Identifies queries exceeding the
-                                      configured execution-time
-                                      threshold.
+## Command-Line Parameters
 
-  Server load                         Evaluates operating-system load
-                                      averages when local server
-                                      information is available.
+The following parameters are supported.
 
-  Active connections                  Evaluates active connection
-                                      activity relative to available CPU
-                                      capacity.
+| Parameter | Description | Default |
+|---|---|---|
+| `-h --dbhost` | Database host name or IP address. If omitted, libpq's local default connection behavior is used. | Local default |
+| `-p --port` | Database server port. | `5432` |
+| `-U --dbuser` | Database user. | libpq default |
+| `-d --database` | Database name. Required. | None |
+| `-w --waitslocks` | Wait/lock threshold in seconds. A value less than or equal to zero disables this check. | Disabled |
+| `-l --longquerymins` | Long-running query threshold in minutes. A value less than or equal to zero disables this check. | Disabled |
+| `-c --vcpus` | Available CPU count. Used by CPU-related checks, particularly for remote database hosts. | Auto-detected locally; otherwise unspecified |
+| `-i --idleintransmins` | Idle-in-transaction threshold in minutes. A value less than or equal to zero disables this check. | Disabled |
+| `-o --idleconnmins` | Idle connection threshold in minutes. | `240` |
+| `--html` | Generate an HTML report in addition to console output. | Disabled |
+| `-v --verbose` | Display additional diagnostic information. | Disabled |
+| `-b --debug` | Display debug information, including executed commands and command results. | Disabled |
 
-  Maximum connections                 Evaluates connection utilization
-                                      against the configured connection
-                                      capacity.
+The database name is the only required command-line parameter. Host, port, and user values may also be supplied through the normal libpq environment and service configuration.
 
-  Cache hit ratio                     Evaluates the database buffer cache
-                                      hit ratio.
+## Default Diagnostic Thresholds
 
-  Database conflicts                  Reports database conflicts,
-                                      deadlocks, and temporary-file
-                                      activity.
+Several checks use fixed thresholds in the current implementation.
 
-  Checkpoints                         Evaluates checkpoint activity,
-                                      timing, WAL generation, and related
-                                      performance indicators.
+| Check | Threshold |
+|---|---:|
+| Maximum connection utilization | 70% of usable connection capacity |
+| Active connections | 2.5 sessions per vCPU |
+| Cache hit ratio | Warning below 90% |
+| OS load | Warning above 90% of available CPU capacity |
+| Idle connection age | 240 minutes by default |
+| Idle connection recent activity | No activity in the previous 1 hour |
+| Data directory usage | Warning above 75% |
+| Table bloat | Greater than 30% and greater than 100 MB estimated excess |
+| Index bloat | Index larger than 50 MB and greater than 30% estimated bloat |
+| Temporary file usage | Warning above 1 GB when there are no conflicts or deadlocks |
+| Replication lag | 30 seconds or 256 MB, as applicable |
 
-  Background writer                   Examines background writer and
-                                      client backend write activity.
+The wait/lock, long-running query, and idle-in-transaction checks are disabled unless their respective thresholds are supplied on the command line.
 
-  Unused indexes                      Identifies indexes that may be
-                                      candidates for further
-                                      investigation.
+## HTML Report
 
-  Connection age                      Evaluates the age and activity
-                                      history of database connections.
+Use `--html` to generate an HTML report containing a summary of the checks and their results. The report includes:
 
-  Orphaned large objects              Identifies large objects that may
-                                      no longer be referenced.
+- Database host, database name, PostgreSQL version, and generation timestamp.
+- Total check count.
+- Counts for `OK`, `WARNING`, and `INFO` results.
+- A health-check table with the status and analysis for each check.
+- Expandable detail sections when a check provides additional diagnostic information.
 
-  Data directory usage                Evaluates filesystem utilization
-                                      for locally accessible PostgreSQL
-                                      data directories.
+The report is written to the current working directory using this filename format:
 
-  Table bloat                         Estimates table bloat and
-                                      identifies potentially excessive
-                                      space usage.
-
-  Index bloat                         Estimates index bloat and
-                                      identifies indexes that may warrant
-                                      further investigation.
-
-  Maintenance candidates              Identifies tables that may need
-                                      VACUUM, ANALYZE, or FREEZE
-                                      attention.
-
-  Replication                         Evaluates primary and standby
-                                      replication status, WAL receiver
-                                      activity, and replication lag.
-  -----------------------------------------------------------------------
-
-Some checks depend on operating-system visibility or PostgreSQL
-version-specific statistics. When information is unavailable, the
-utility reports the condition rather than treating missing information
-as a confirmed database failure.
-
-## Diagnostic Thresholds
-
-Several checks use configurable command-line thresholds, allowing DBAs
-to adjust monitoring behavior to their environment.
-
-The following options control the primary activity-related checks:
-
-  -----------------------------------------------------------------------
-  Parameter                           Description
-  ----------------------------------- -----------------------------------
-  `--waitslocks`                      Minimum duration in seconds for a
-                                      query waiting on a database
-                                      resource to be reported.
-
-  `--longquerymins`                   Minimum query duration in minutes
-                                      before a query is reported.
-
-  `--idleintransmins`                 Maximum idle-in-transaction
-                                      duration in minutes before a
-                                      session is reported.
-
-  `--idleconnmins`                    Maximum idle connection duration in
-                                      minutes before a connection is
-                                      reported.
-
-  `--vcpus`                           CPU count used by CPU-related
-                                      diagnostic checks.
-  -----------------------------------------------------------------------
-
-Additional checks use built-in diagnostic thresholds, including:
-
--   **Connection utilization:** 70% of the applicable connection
-    capacity.
--   **Idle connection age:** 240 minutes by default.
--   **Replication message freshness:** 30 seconds.
--   **Replication replay lag:** 30 seconds or 256 MB of WAL difference.
-
-These thresholds are diagnostic indicators, not universal PostgreSQL
-performance targets. Actual operating conditions, workload
-characteristics, and application requirements should be considered when
-evaluating the results.
-
-## Reporting
-
-`pg_smartcheck` supports console output and optional HTML reporting.
-
-### Console Output
-
-Each diagnostic check reports one of three primary statuses:
-
--   **OK:** No issue was detected by the check.
--   **WARNING:** A condition was detected that may require
-    investigation.
--   **INFO:** Additional information is provided, or a check could not
-    be performed.
-
-Verbose mode (`-v`) displays additional diagnostic details for selected
-checks, including bloat estimates and maintenance candidates.
-
-Debug mode (`-b`) displays additional execution information useful when
-troubleshooting the utility itself.
-
-### HTML Reporting
-
-The `--html` option generates a standalone HTML report containing:
-
--   Database host and database name.
--   PostgreSQL version and report generation timestamp.
--   Total number of checks.
--   Counts of OK, WARNING, and INFO results.
--   Detailed results for each health check.
--   Expandable sections containing additional diagnostic information.
-
-The report is suitable for reviewing database health and sharing
-diagnostic findings with other DBAs.
-
-## Cron Setup Example
-
-This example runs this tool four times per day at the :15 and :45 minute
-marks. That gives runs at:
-
--   6:15 AM
--   12:45 PM
--   6:15 PM
--   10:45 PM
-
-``` cron
-15 6,18 * * * /usr/bin/python3 /path/to/pg_smartcheck.py -d mydb --html >> /var/log/pg_smartcheck_cron.log 2>&1
-45 12,22 * * * /usr/bin/python3 /path/to/pg_smartcheck.py -d mydb --html >> /var/log/pg_smartcheck_cron.log 2>&1
+```text
+pg_smartcheck_YYYYMMDD_HHMM.html
 ```
 
-Make sure the database authentication environment is available to the
-scheduled process.
+For example:
+
+```text
+pg_smartcheck_20261105_1430.html
+```
 
 ## Invocation
 
 General syntax:
 
-Minimum options using defaults:
+```text
+python pg_smartcheck.py -d <database> [options]
+```
 
-`python pg_smartcheck.py -d <dbname> [connection options] [diagnostic options] [reporting options]`
+The `psql` client must be available in the `PATH`. Authentication should be configured before running the utility, preferably through `.pgpass` or the normal PostgreSQL/libpq authentication mechanisms.
 
-The database name is required. Host, port, and user can be supplied
-explicitly or obtained from the standard PostgreSQL/libpq environment
-and configuration.
+### Basic execution
 
-Make sure database authentication is configured before executing the
-utility. The `PGPASSWORD` environment variable or a properly configured
-`.pgpass` file can be used.
+Connect to a local database using the default port and user:
 
-The following examples illustrate common ways to invoke the program.
+```bash
+python3 pg_smartcheck.py -d testing
+```
 
-`<br/>`{=html}`<br/>`{=html} **Basic health check**
+Connect to a database on another host:
 
-Connect to a PostgreSQL database and execute the standard diagnostic
-checks.
+```bash
+python3 pg_smartcheck.py -h 192.168.0.100 -p 5432 -U postgres -d testing
+```
 
-`python pg_smartcheck.py -h localhost -d testing -U postgres -p 5432`
+### Enable the wait and lock check
 
-`<br/>`{=html}`<br/>`{=html} **Generate an HTML report**
+Report active queries waiting longer than 30 seconds:
 
-Execute the health checks and generate a detailed HTML report in the
-current working directory.
+```bash
+python3 pg_smartcheck.py -d testing -w 30
+```
 
-`python pg_smartcheck.py -h localhost -d testing -U postgres -p 5432 --html`
+### Enable the long-running query check
 
-`<br/>`{=html}`<br/>`{=html} **Enable verbose output**
+Report non-idle queries running longer than 5 minutes:
 
-Display additional diagnostic information while performing the health
-checks.
+```bash
+python3 pg_smartcheck.py -d testing -l 5
+```
 
-`python pg_smartcheck.py -h localhost -d testing -U postgres -p 5432 -v`
+### Enable the idle-in-transaction check
 
-`<br/>`{=html}`<br/>`{=html} **Monitor waits and long-running queries**
+Report sessions that have remained idle in transaction longer than 10 minutes:
 
-Report queries waiting on database resources for more than 30 seconds
-and queries running longer than 10 minutes.
+```bash
+python3 pg_smartcheck.py -d testing -i 10
+```
 
-`python pg_smartcheck.py -h localhost -d testing -U postgres -p 5432 -w 30 -l 10`
+### Specify the CPU count
 
-`<br/>`{=html}`<br/>`{=html} **Monitor idle sessions**
+Provide the number of vCPUs available to a remote database server:
 
-Report sessions idle in transaction for more than 5 minutes and idle
-connections older than 120 minutes.
+```bash
+python3 pg_smartcheck.py -h dbserver.example.com -U postgres -d testing -c 8
+```
 
-`python pg_smartcheck.py -h localhost -d testing -U postgres -p 5432 -i 5 -o 120`
+### Generate an HTML report
 
-`<br/>`{=html}`<br/>`{=html} **Specify CPU capacity**
+Run all checks and generate an HTML report:
 
-Provide the number of available CPUs for CPU-related diagnostic checks.
+```bash
+python3 pg_smartcheck.py -d testing --html
+```
 
-`python pg_smartcheck.py -h localhost -d testing -U postgres -p 5432 -c 4`
+### Enable verbose output
 
-`<br/>`{=html}`<br/>`{=html} **Run a comprehensive diagnostic report**
+Display additional diagnostic information:
 
-Combine activity thresholds, CPU capacity, verbose output, and HTML
-reporting.
+```bash
+python3 pg_smartcheck.py -d testing -v
+```
 
-`python pg_smartcheck.py -h localhost -d testing -U postgres -p 5432 -w 30 -l 10 -i 5 -o 240 -c 4 -v --html`
+### Enable debug output
 
-`<br/>`{=html}`<br/>`{=html} **Capture console output in a log file**
+Display executed commands and their output:
 
-Execute the utility and append console output to a log file.
+```bash
+python3 pg_smartcheck.py -d testing -b
+```
 
-`python3 pg_smartcheck.py 2>&1 | tee -a pg_smartcheck.log`
+## Scheduling
+
+`pg_smartcheck` can be run periodically through cron on Linux or through Task Scheduler on Windows. For example, the following cron entry runs the utility every day at 6:15 AM and appends console output to a log file:
+
+```cron
+15 6 * * * /usr/bin/python3 /path/to/pg_smartcheck.py -d testing >> /var/log/pg_smartcheck.log 2>&1
+```
+
+Adjust the executable path, script path, database name, authentication configuration, and schedule for your environment.
+
+## Design Philosophy
+
+`pg_smartcheck` is intended to be a practical diagnostic companion for PostgreSQL DBAs. It brings a broad collection of health and performance checks into one execution, highlights conditions that may deserve attention, and provides supporting details without changing the database.
+
+The checks are deliberately diagnostic. A warning is a starting point for investigation, not an instruction to make an immediate configuration or maintenance change. Database workload, application behavior, statistics history, PostgreSQL version, and hosting environment all matter when interpreting the results.
 
 ## Future Enhancements
 
-Planned enhancements include additional monitoring capabilities and
-integration with PgBouncer monitoring.
+- Integrate PgBouncer monitoring using the retained `pgbouncer_pkg` functionality.
