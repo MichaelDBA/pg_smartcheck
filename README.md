@@ -251,7 +251,33 @@ The checks are deliberately diagnostic. A warning is a starting point for invest
 
 ## Sample Output
 
-<img width="1689" height="599" alt="image" src="https://github.com/user-attachments/assets/12db6d6f-2203-407e-942c-4dafa5b4b24f" />
+[INFO]  pg_smartcheck  version: 1.0  November 06, 2026     Python Version: 3     PG Database: mydbj
+[INFO]  OS load check not applicable for remote DB instances.
+[INFO]  N/A: PostgreSQL host is remote. Server filesystem usage is unavailable.
+[WARN]  3 PostgreSQL configuration recommendation(s) need attention.
+[WARN]  checkpoint_completion_target is less than optimal (value=0.7).
+[WARN]  idle_in_transaction_session_timeout is turned off.
+[WARN]  track_activity_query_size may need to be increased; query text may be truncated (value=1024). Changing this setting requires a PostgreSQL restart.
+[ OK ]  Sessions established: 2,545,077  Average session creation rate: 1314.92 per hour.  Statistics reset: 2026-08-17 23:08:07
+[ OK ]  No waiting/blocked queries longer than 10 seconds were detected.
+[ OK ]  No "idle in transaction" sessions longer than 10 minute(s) were detected.
+[ OK ]  No idle connections older than 240 minute(s) were detected.
+[ OK ]  No long-running queries longer than 1 minute(s) were detected.
+[ OK ]  Active connection load is within threshold: active_sessions=1  threshold=20.0  vCPUs=8
+[ OK ]  Active: 0.  Idle in Trans: 0.  46 current connections.  Started (last 2 mins): 2.  Started (last 5 mins): 4.  Started (last 15 mins): 20.  46 idle connections and 45 of them have recent activity.  Average idle age: 0.02 days (31 minutes).
+[ OK ]  PostgreSQL connection utilization: 47/497 (9.5%)  max_connections=500
+[ OK ]  High cache hit ratio: 99.99% (blocks hit vs blocks read)  blocks_read=308225715  blocks_hit=5889055764027
+[WARN]  Database activity requires investigation: conflicts=0  deadlocks=0  temp_files=177  temp_bytes=9.59 GB  stats_reset=N/A
+[ OK ]  Checkpoint activity is healthy. Checkpoints are occurring at the expected interval without excessive WAL-driven activity.
+[ OK ]  Background writer activity is healthy. Client backend writes account for only 1.9% of total buffer writes.
+[WARN]  39 unused indexes were found.
+[ OK ]  No orphaned large objects were found.
+[ OK ]  No bloated tables detected.
+[ OK ]  No bloated indexes detected.
+[WARN]  Maintenance candidates detected: VACUUM/ANALYZE: 80, VACUUM: 4, ANALYZE: 5, FREEZE: 0
+[ OK ]  1 streaming replication connection(s) detected. No significant replication lag detected.
+[INFO]  HTML report generated: C:\mydirectory\pg_smartcheck_20261106_0940.html
+
 
 
 
