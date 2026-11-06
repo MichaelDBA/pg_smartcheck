@@ -1177,7 +1177,7 @@ class maint:
         elif self.pgversionmajor == Decimal("18.0"):
 
             sql = "select io.backend_bytes, io.elapsed_secs, bg.buffers_clean, bg.maxwritten_clean, bg.elapsed_secs, cp.buffers_written, cp.elapsed_secs, current_setting('block_size')::bigint " \
-                  "from (select coalesce(sum(write_bytes), 0) as backend_bytes, coalesce(extract(epoch from (clock_timestamp() - min(stats_reset)), 0), 0) as elapsed_secs " \
+                  "from (select coalesce(sum(write_bytes), 0) as backend_bytes, coalesce(extract(epoch from (clock_timestamp() - min(stats_reset))), 0) as elapsed_secs " \
                   "from pg_stat_io where backend_type = 'client backend' and object = 'relation' and context = 'normal') io " \
                   "cross join (select buffers_clean, maxwritten_clean, coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0) as elapsed_secs from pg_stat_bgwriter) bg " \
                   "cross join (select buffers_written, coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0) as elapsed_secs from pg_stat_checkpointer) cp"
