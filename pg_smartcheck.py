@@ -44,6 +44,7 @@
 # who did it         Date           did what
 # ==========         =========      ==============================
 # Michael Vitale     11/05/2026     Initial development, consolidating pg_report and pg_check.
+# Michael Vitale     11/06/2026     Added more logic and refined it in context of BGWriter.
 ###############################################################################
 
 import sys
@@ -77,8 +78,8 @@ HIGHLOAD  = 4
 DESCRIPTION = "Comprehensive PostgreSQL database health analysis, performance diagnostics, maintenance recommendations, and detailed reporting."
 VERSION     = 1.0
 PROGNAME    = "pg_smartcheck"
-ADATE       = "November 05, 2026"
-PROGDATE    = "2026-11-05"
+ADATE       = "November 06, 2026"
+PROGDATE    = "2026-11-06"
 MARK_OK     = "[ OK ]  "
 MARK_WARN   = "[WARN]  "
 MARK_INFO   = "[INFO]  "
@@ -357,21 +358,19 @@ class maint:
 
         sql1 = "select count(*) from pg_stat_activity where wait_event is NOT NULL AND wait_event <> 'DataFileRead' and state = 'active' and backend_type <> 'walsender' and now() - query_start > interval '%d seconds'" % self.waitslocks
 
-        sql2 = "select 'db=' || datname || '  user=' || usename || '  appname=' || application_name || '  waitinfo=' || wait_event || '-' || wait_event_type || '  duration=' ||  " \
-               "cast(EXTRACT(EPOCH FROM (now() - query_start)) as integer) || E'\\nsql=' || regexp_replace(replace(regexp_replace(query, E'[\\n\\r]+', ' ', 'g' ),'    ',''),  " \
-                "'[^\\x20-\\x7f\\x0d\\x1b]', '', 'g') || E'\\n' from pg_stat_activity where wait_event is NOT NULL and wait_event <> 'DataFileRead' and state = 'active' and backend_type <> 'walsender' and now() - query_start > interval '%d seconds'" \
-                % self.waitslocks               
+        sql2 = "select 'db=' || datname || '  user=' || usename || '  appname=' || application_name || '  waitinfo=' || wait_event || '-' || wait_event_type || '  duration=' || " \
+               "cast(EXTRACT(EPOCH FROM (now() - query_start)) as integer) || chr(10) || 'sql=' || regexp_replace(replace(regexp_replace(query, E'[\\n\\r]+', ' ', 'g' ),'    ',''), " \
+               "'[^\\x20-\\x7f\\x0d\\x1b]', '', 'g') || chr(10) from pg_stat_activity where wait_event IS NOT NULL and wait_event <> 'DataFileRead' and state = 'active' AND " \
+               "backend_type <> 'walsender' and now() - query_start > interval '%d seconds'" % self.waitslocks                
 
-        sql3 = "SELECT E'\\n\\nblocked_pid=' || blocked_activity.pid || ' blocked_user=' || coalesce(blocked_activity.usename, 'N/A') || " \
-               "E'\\nblocking_pid=' || blockers.pid || ' blocking_user=' || coalesce(blocking_activity.usename, 'N/A') || " \
-               "E'\\nblocked_query=' || coalesce(regexp_replace(blocked_activity.query, E'[\\n\\r]+', ' ', 'g'), 'N/A') || " \
-               "E'\\nblocking_query=' || coalesce(regexp_replace(blocking_activity.query, E'[\\n\\r]+', ' ', 'g'), 'N/A') || E'\\n\\n' " \
-               "FROM pg_catalog.pg_stat_activity blocked_activity CROSS JOIN LATERAL " \
-               "unnest(pg_catalog.pg_blocking_pids(blocked_activity.pid)) AS blockers(pid) " \
-               "LEFT JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blockers.pid " \
-               "WHERE blocked_activity.wait_event IS NOT NULL AND blocked_activity.wait_event <> 'DataFileRead' " \
-               "AND blocked_activity.state = 'active' AND blocked_activity.backend_type <> 'walsender' " \
-               "AND now() - blocked_activity.query_start > interval '%d seconds'" % self.waitslocks
+        sql3 = "SELECT 'blocked_pid=' || a.pid || chr(10) || 'blocked_query=' || coalesce(regexp_replace(a.query, E'[\\n\\r]+', ' ', 'g'), 'N/A') || " \
+               "chr(10) || 'blockers=' || coalesce((SELECT string_agg('pid=' || b.pid || ' user=' || coalesce(b.usename, 'N/A') || ' query=' || coalesce(regexp_replace(b.query, E'[\\n\\r]+', ' ', 'g'), 'N/A'), '; ') " \
+               "FROM unnest(pg_catalog.pg_blocking_pids(a.pid)) AS p(pid) JOIN pg_catalog.pg_stat_activity b ON b.pid = p.pid), 'none') || " \
+               "chr(10) || 'blockees=' || coalesce((SELECT string_agg('pid=' || x.pid || ' user=' || coalesce(x.usename, 'N/A') || ' query=' || coalesce(regexp_replace(x.query, E'[\\n\\r]+', ' ', 'g'), 'N/A'), '; ') " \
+               "FROM pg_catalog.pg_stat_activity x WHERE a.pid = ANY(pg_catalog.pg_blocking_pids(x.pid))), 'none') || chr(10) || chr(10) " \
+               "FROM pg_catalog.pg_stat_activity a WHERE a.wait_event IS NOT NULL AND a.wait_event <> 'DataFileRead' " \
+               "AND a.state = 'active' AND a.backend_type <> 'walsender' " \
+               "AND now() - a.query_start > interval '%d seconds'" % self.waitslocks               
 
         cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql1)
         rc, results = self.executecmd(cmd, True)
@@ -446,11 +445,11 @@ class maint:
         result["count"] = idle_intrans_cnt
 
         if idle_intrans_cnt == 0:
-            result["message"] = "No \"idle in transaction\" sessions longer than %d minutes were detected." % self.idleintransmins
+            result["message"] = "No \"idle in transaction\" sessions longer than %d minute(s) were detected." % self.idleintransmins
             return SUCCESS, result
 
         result["status"] = "WARNING"
-        result["message"] = "%d \"idle in transaction\" sessions longer than %d minutes were detected." % (idle_intrans_cnt, self.idleintransmins)
+        result["message"] = "%d \"idle in transaction\" sessions longer than %d minute(s) were detected." % (idle_intrans_cnt, self.idleintransmins)
 
         cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql2)
         rc, details = self.executecmd(cmd, False)
@@ -497,11 +496,11 @@ class maint:
         result["count"] = idle_connections_cnt
 
         if idle_connections_cnt == 0:
-            result["message"] = "No idle connections older than %d minutes were detected." % self.idleconnmins
+            result["message"] = "No idle connections older than %d minute(s) were detected." % self.idleconnmins
             return SUCCESS, result
 
         result["status"] = "WARNING"
-        result["message"] = "%d idle connections older than %d minutes were detected." % (idle_connections_cnt, self.idleconnmins)
+        result["message"] = "%d idle connections older than %d minute(s) were detected." % (idle_connections_cnt, self.idleconnmins)
 
         cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql2)
         rc, details = self.executecmd(cmd, False)
@@ -550,11 +549,11 @@ class maint:
         result["count"] = long_queries_cnt
 
         if long_queries_cnt == 0:
-            result["message"] = "No long-running queries longer than %d minutes were detected." % self.longquerymins
+            result["message"] = "No long-running queries longer than %d minute(s) were detected." % self.longquerymins
             return SUCCESS, result
 
         result["status"] = "WARNING"
-        result["message"] = "%d long-running queries longer than %d minutes were detected." % (long_queries_cnt, self.longquerymins)
+        result["message"] = "%d long-running queries longer than %d minute(s) were detected." % (long_queries_cnt, self.longquerymins)
 
         cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql2)
         rc, details = self.executecmd(cmd, False)
@@ -675,8 +674,7 @@ class maint:
 
         threshold = Decimal(str(vcpus)) * Decimal("2.5")
 
-        sql = "select count(*) from pg_stat_activity where state in ('active', 'idle in transaction')"
-
+        sql = "select count(*) from pg_stat_activity WHERE backend_type = 'client backend' AND state in ('active', 'idle in transaction')"
         cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
         rc, results = self.executecmd(cmd, True)
 
@@ -959,28 +957,7 @@ class maint:
         except (ValueError, TypeError):
             return ERROR, "Invalid checkpoint configuration returned: %s" % results
 
-        # Get backend fsync statistics where supported.
-
-        buffers_backend_fsync = None
-
-        if self.pgversionmajor < Decimal("17.0"):
-
-            sql = "select buffers_backend_fsync from pg_stat_bgwriter"
-
-            cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-            rc, results = self.executecmd(cmd, True)
-
-            if rc != SUCCESS:
-                return rc, "Unable to get backend fsync statistics: %s" % results
-
-            try:
-                buffers_backend_fsync = int(results.strip())
-
-            except (ValueError, TypeError):
-                return ERROR, "Invalid backend fsync statistics returned: %s" % results
-
         # Calculate checkpoint statistics.
-
         total_checkpoints = checkpoints_timed + checkpoints_req
         result["count"] = total_checkpoints
 
@@ -997,7 +974,6 @@ class maint:
         pacing_pct = avg_write_secs / expected_write_secs * 100.0 if expected_write_secs > 0 else 0.0
 
         # Get WAL generation statistics where supported.
-
         wal_mb_per_hour = None
 
         if self.pgversionmajor >= Decimal("14.0"):
@@ -1097,11 +1073,14 @@ class maint:
                 wal_pct = wal_mb_per_timeout / wal_limit_mb * 100.0
 
                 if wal_pct < 50.0:
-                    details.append("WAL generation is comfortably below max_wal_size. Timeout-driven checkpoints are much more likely than WAL-size-driven checkpoints. WAL=%.2f MB per timeout max_wal_size=%.0f MB (wal_pct < 50.0)" % (wal_mb_per_timeout, wal_limit_mb))
+                    details.append("WAL generation is comfortably below max_wal_size. Timeout-driven checkpoints are much more likely than WAL-size-driven checkpoints. WAL=%.2f MB per timeout max_wal_size=%.0f MB (wal_pct < 50.0)" \
+                                   % (wal_mb_per_timeout, wal_limit_mb))
                 elif wal_pct < 100.0:
-                    details.append("WAL generation is approaching max_wal_size. Monitor requested checkpoints for signs of WAL-driven activity. WAL=%.2f MB per timeout max_wal_size=%.0f MB (50.0 <= wal_pct < 100.0)" % (wal_mb_per_timeout, wal_limit_mb))
+                    details.append("WAL generation is approaching max_wal_size. Monitor requested checkpoints for signs of WAL-driven activity. WAL=%.2f MB per timeout max_wal_size=%.0f MB (50.0 <= wal_pct < 100.0)" \
+                                   % (wal_mb_per_timeout, wal_limit_mb))
                 else:
-                    details.append("WAL generation exceeds max_wal_size per checkpoint timeout. WAL pressure may be triggering additional checkpoints. WAL=%.2f MB per timeout max_wal_size=%.0f MB (wal_pct >= 100.0)" % (wal_mb_per_timeout, wal_limit_mb))
+                    details.append("WAL generation exceeds max_wal_size per checkpoint timeout. WAL pressure may be triggering additional checkpoints. WAL=%.2f MB per timeout max_wal_size=%.0f MB (wal_pct >= 100.0)" \
+                                   % (wal_mb_per_timeout, wal_limit_mb))
 
         else:
             details.append("WAL generation statistics are unavailable or could not be calculated. (wal_mb_per_hour is None)")
@@ -1125,17 +1104,7 @@ class maint:
         else:
             details.append("Checkpointer is in its processing loop. Current wait event=%s (checkpointer_wait != 'CheckpointWriteDelay' and checkpointer_wait != 'N/A')" % checkpointer_wait)
 
-        # Interpret backend fsync activity.
-
-        if buffers_backend_fsync is None:
-            details.append("Backend fsync statistics are unavailable on PostgreSQL 17+. (buffers_backend_fsync is None)")
-        elif buffers_backend_fsync == 0:
-            details.append("No backend fsync activity has been recorded since statistics reset. (buffers_backend_fsync == 0)")
-        else:
-            details.append("Backend fsync activity has been recorded and should be monitored. backend_fsyncs=%d (buffers_backend_fsync > 0)" % buffers_backend_fsync)
-
         # Set the overall checkpoint status and summary message.
-
         if warnings:
             result["status"] = "WARNING"
             result["message"] = "Checkpoint warning: %s. interval=%.2f mins timed=%.1f%% requested=%.1f%%" % (", ".join(warnings), avg_interval_mins, timed_pct, requested_pct)
@@ -1161,11 +1130,16 @@ class maint:
             "details": ""
         }
 
-        # PostgreSQL 15: Compare background writer and client backend buffers.
+        buffers_backend_fsync = None
+        block_size = 0
+        maxwritten_clean = 0
+        maxwritten_elapsed_secs = 0
+
+        # PostgreSQL 15: Use cumulative buffer counters.
 
         if self.pgversionmajor == Decimal("15.0"):
 
-            sql = "select buffers_clean, buffers_backend, maxwritten_clean from pg_stat_bgwriter"
+            sql = "select buffers_clean, buffers_backend, buffers_backend_fsync, maxwritten_clean, buffers_checkpoint, coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0), current_setting('block_size')::bigint from pg_stat_bgwriter"
 
             cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
             rc, results = self.executecmd(cmd, True)
@@ -1176,30 +1150,37 @@ class maint:
             try:
                 values = results.strip().split("|")
 
-                if len(values) != 3:
-                    raise ValueError("Expected three values.")
+                if len(values) != 7:
+                    raise ValueError("Expected seven values.")
 
                 buffers_clean = int(values[0])
                 buffers_backend = int(values[1])
-                maxwritten_clean = int(values[2])
-                
+                buffers_backend_fsync = int(values[2])
+                maxwritten_clean = int(values[3])
+                buffers_checkpoint = int(values[4])
+                elapsed_secs = float(values[5])
+                block_size = int(values[6])
+
+                if elapsed_secs <= 0 or block_size <= 0:
+                    raise ValueError("Invalid statistics elapsed time or block size.")
+
+                bgwriter_write_rate = buffers_clean / elapsed_secs
+                backend_write_rate = buffers_backend / elapsed_secs
+                checkpoint_write_rate = buffers_checkpoint / elapsed_secs
+                maxwritten_elapsed_secs = elapsed_secs
+
             except (ValueError, TypeError):
                 return ERROR, "Invalid background writer statistics returned: %s" % results
 
-            result["count"] = buffers_backend
-
-            writer_warning = buffers_backend > buffers_clean
-
-            result["details"] = "Background writer buffers_clean=%d client backend buffers_backend=%d maxwritten_clean=%d" % (buffers_clean, buffers_backend, maxwritten_clean)
-
-        # PostgreSQL 18: Compare client backend write bytes and background writer buffers.
+        # PostgreSQL 18: Use pg_stat_io and pg_stat_checkpointer.
 
         elif self.pgversionmajor == Decimal("18.0"):
 
-            sql = "select io.backend_bytes, io.elapsed_secs, bg.buffers_clean, bg.maxwritten_clean, bg.elapsed_secs, current_setting('block_size')::bigint " \
-                  "from (select coalesce(sum(write_bytes), 0) as backend_bytes, coalesce(extract(epoch from (clock_timestamp() - min(stats_reset))), 0) as elapsed_secs " \
-                  "from pg_stat_io where backend_type = 'client backend' and object = 'relation' and context = 'normal') io cross join (select buffers_clean, " \
-                  "maxwritten_clean, coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0) as elapsed_secs from pg_stat_bgwriter) bg"
+            sql = "select io.backend_bytes, io.elapsed_secs, bg.buffers_clean, bg.maxwritten_clean, bg.elapsed_secs, cp.buffers_written, cp.elapsed_secs, current_setting('block_size')::bigint " \
+                  "from (select coalesce(sum(write_bytes), 0) as backend_bytes, coalesce(extract(epoch from (clock_timestamp() - min(stats_reset)), 0), 0) as elapsed_secs " \
+                  "from pg_stat_io where backend_type = 'client backend' and object = 'relation' and context = 'normal') io " \
+                  "cross join (select buffers_clean, maxwritten_clean, coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0) as elapsed_secs from pg_stat_bgwriter) bg " \
+                  "cross join (select buffers_written, coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0) as elapsed_secs from pg_stat_checkpointer) cp"
 
             cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
             rc, results = self.executecmd(cmd, True)
@@ -1210,39 +1191,46 @@ class maint:
             try:
                 values = results.strip().split("|")
 
-                if len(values) != 6:
-                    raise ValueError("Expected six values.")
+                if len(values) != 8:
+                    raise ValueError("Expected eight values.")
 
                 backend_bytes = int(values[0])
                 backend_elapsed_secs = float(values[1])
                 buffers_clean = int(values[2])
                 maxwritten_clean = int(values[3])
                 bgwriter_elapsed_secs = float(values[4])
-                block_size = int(values[5])
-                
+                buffers_checkpoint = int(values[5])
+                checkpoint_elapsed_secs = float(values[6])
+                block_size = int(values[7])
+
+                if backend_elapsed_secs <= 0 or bgwriter_elapsed_secs <= 0 or checkpoint_elapsed_secs <= 0 or block_size <= 0:
+                    raise ValueError("Invalid statistics elapsed time or block size.")
+
+                backend_write_rate = backend_bytes / backend_elapsed_secs / block_size
+                bgwriter_write_rate = buffers_clean / bgwriter_elapsed_secs
+                checkpoint_write_rate = buffers_checkpoint / checkpoint_elapsed_secs
+                maxwritten_elapsed_secs = bgwriter_elapsed_secs
+
             except (ValueError, TypeError):
                 return ERROR, "Invalid background writer and I/O statistics returned: %s" % results
-
-            if backend_elapsed_secs <= 0 or bgwriter_elapsed_secs <= 0 or block_size <= 0:
-                result["status"] = "INFO"
-                result["message"] = "Background writer comparison could not be evaluated. Statistics elapsed time or block size is zero."
-                return SUCCESS, result
-
-            backend_write_rate = backend_bytes / backend_elapsed_secs
-            bgwriter_write_rate = buffers_clean * block_size / bgwriter_elapsed_secs
-
-            writer_warning = backend_write_rate > bgwriter_write_rate
-
-            result["count"] = int(backend_write_rate)
-
-            result["details"] = "Client backend write rate=%.2f MB/sec background writer write rate=%.2f MB/sec maxwritten_clean=%d" % (backend_write_rate / 1024.0 / 1024.0, bgwriter_write_rate / 1024.0 / 1024.0, maxwritten_clean)
 
         else:
             result["status"] = "INFO"
             result["message"] = "Background writer monitoring currently supports PostgreSQL 15 and 18."
             return SUCCESS, result
 
+        # Calculate write percentages and background writer limit rate.
+
+        total_write_rate = backend_write_rate + bgwriter_write_rate + checkpoint_write_rate
+
+        backend_write_pct = backend_write_rate / total_write_rate * 100.0 if total_write_rate > 0 else 0.0
+        bgwriter_write_pct = bgwriter_write_rate / total_write_rate * 100.0 if total_write_rate > 0 else 0.0
+        checkpoint_write_pct = checkpoint_write_rate / total_write_rate * 100.0 if total_write_rate > 0 else 0.0
+
+        maxwritten_rate = maxwritten_clean / maxwritten_elapsed_secs * 60.0 if maxwritten_elapsed_secs > 0 else 0.0
+
         # Get background writer configuration.
+
         sql = "select current_setting('bgwriter_lru_multiplier'), current_setting('bgwriter_lru_maxpages'), current_setting('bgwriter_delay'), current_setting('shared_buffers')"
 
         cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
@@ -1253,6 +1241,7 @@ class maint:
 
         try:
             values = results.strip().split("|")
+
             if len(values) != 4:
                 raise ValueError("Expected four values.")
 
@@ -1263,14 +1252,55 @@ class maint:
 
         except (ValueError, TypeError):
             return ERROR, "Invalid background writer configuration returned: %s" % results
-            
+
+        # Calculate background writer cleaning capacity.
+        bgwriter_capacity_pct = 0.0
+        bgwriter_maxpages = int(bgwriter_lru_maxpages)
+        bgwriter_delay_secs = float(bgwriter_delay.replace("ms", "")) / 1000.0
+
+        if bgwriter_maxpages > 0 and bgwriter_delay_secs > 0:
+            bgwriter_capacity = bgwriter_maxpages / bgwriter_delay_secs
+            bgwriter_capacity_pct = bgwriter_write_rate / bgwriter_capacity * 100.0
+
         # Evaluate background writer activity.
-        if writer_warning:
-            result["status"] = "WARNING"
-            result["message"] = "Client backend write activity exceeds the background writer's recorded activity. This is an approximate indicator; review bgwriter_lru_multiplier (%s), bgwriter_lru_maxpages (%s), bgwriter_delay (%s), and shared_buffers (%s)." \
-                                % (bgwriter_lru_multiplier, bgwriter_lru_maxpages, bgwriter_delay, shared_buffers)                                
+        warnings = []
+
+        if buffers_backend_fsync is not None and buffers_backend_fsync > 0:
+            warnings.append("backend processes have performed fsync operations because the background writer fsync request queue was full (buffers_backend_fsync=%d)" % buffers_backend_fsync)
+
+        if backend_write_pct > (bgwriter_write_pct + checkpoint_write_pct):
+            warnings.append("client backends are performing more writes than the background writer and checkpointer combined (backend_write_pct=%.1f%%)" % backend_write_pct)
+
+        if maxwritten_rate >= 5.0 and bgwriter_capacity_pct >= 50.0:
+            warnings.append("background writer is frequently reaching its cleaning limit while operating near its capacity (maxwritten_clean=%.2f/min, capacity_utilization=%.1f%%)" % (maxwritten_rate, bgwriter_capacity_pct))
+        elif maxwritten_rate >= 1.0 and bgwriter_capacity_pct >= 10.0:
+            warnings.append("background writer is repeatedly reaching its cleaning limit while using substantial cleaning capacity (maxwritten_clean=%.2f/min, capacity_utilization=%.1f%%)" % (maxwritten_rate, bgwriter_capacity_pct))            
+
+        # Build diagnostic details.
+        details = []
+
+        details.append("Backend writes=%.2f buffers/sec (%.1f%%), background writer writes=%.2f buffers/sec (%.1f%%), checkpoint writes=%.2f buffers/sec (%.1f%%)" \
+                       % (backend_write_rate, backend_write_pct, bgwriter_write_rate, bgwriter_write_pct, checkpoint_write_rate, checkpoint_write_pct))
+
+        details.append("Background writer limit hits=%.2f/min (maxwritten_clean=%d), cleaning capacity utilization=%.2f%% (theoretical maximum=%.2f buffers/sec)" \
+                       % (maxwritten_rate, maxwritten_clean, bgwriter_capacity_pct, bgwriter_maxpages / bgwriter_delay_secs if bgwriter_maxpages > 0 and bgwriter_delay_secs > 0 else 0.0))
+
+        if buffers_backend_fsync is None:
+            details.append("Backend fsync queue-full statistics are unavailable on PostgreSQL 17+.")
         else:
-            result["message"] = "Background writer activity is healthy. Client backends are not doing more writing than the background writer."
+            details.append("Backend fsync queue-full events=%d" % buffers_backend_fsync)
+
+        details.append("Background writer configuration: bgwriter_lru_multiplier=%s bgwriter_lru_maxpages=%s bgwriter_delay=%s shared_buffers=%s" \
+                       % (bgwriter_lru_multiplier, bgwriter_lru_maxpages, bgwriter_delay, shared_buffers))
+
+        result["count"] = len(warnings)
+        result["details"] = "\n".join(details)
+
+        if warnings:
+            result["status"] = "WARNING"
+            result["message"] = "Background writer activity needs attention: %s." % "; ".join(warnings)
+        else:
+            result["message"] = "Background writer activity is healthy. Client backend writes account for only %.1f%% of total buffer writes." % backend_write_pct
 
         return SUCCESS, result
         
@@ -1307,8 +1337,10 @@ class maint:
             result["status"] = "WARNING"
             result["message"] = "%d unused indexes were found." % unused_indexes_cnt
 
-            if self.verbose:
-                sql = "SELECT quote_ident(schemaname) || '.' || quote_ident(indexrelname) || ' on ' || quote_ident(schemaname) || '.' || quote_ident(relname) || ' (' || pg_size_pretty(pg_relation_size(indexrelid)) || ')' FROM pg_stat_user_indexes JOIN pg_index USING(indexrelid) WHERE idx_scan = 0 AND idx_tup_read = 0 AND idx_tup_fetch = 0 AND NOT indisprimary AND NOT indisunique AND NOT indisexclusion AND indisvalid AND indisready AND pg_relation_size(indexrelid) > 8192 ORDER BY schemaname, relname, indexrelname"
+            if self.verbose or self.html_format:
+                sql = "SELECT quote_ident(schemaname) || '.' || quote_ident(indexrelname) || ' on ' || quote_ident(schemaname) || '.' || quote_ident(relname) || " \
+                      "' (' || pg_size_pretty(pg_relation_size(indexrelid)) || ')' FROM pg_stat_user_indexes JOIN pg_index USING(indexrelid) WHERE idx_scan = 0 AND idx_tup_read = 0 AND " \
+                      "idx_tup_fetch = 0 AND NOT indisprimary AND NOT indisunique AND NOT indisexclusion AND indisvalid AND indisready AND pg_relation_size(indexrelid) > 8192 ORDER BY schemaname, relname, indexrelname"
 
                 cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
                 rc, details = self.executecmd(cmd, False)
@@ -1318,6 +1350,50 @@ class maint:
 
         return SUCCESS, result
 
+
+    ###########################################################
+    def check_connectionchurn(self):
+
+        result = {
+            "check": "connectionchurn",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        if self.pgversionmajor < Decimal("14.0"):
+            result["status"] = "INFO"
+            result["message"] = "Connection churn check requires PostgreSQL 14 or newer."
+            return SUCCESS, result
+
+        sql = "SELECT COALESCE(SUM(s.sessions), 0), COALESCE(ROUND(SUM(s.sessions::numeric / NULLIF(EXTRACT(EPOCH FROM (now() - COALESCE(s.stats_reset, pg_postmaster_start_time()))) / 3600.0, 0)), 2), 0), " \
+              "COALESCE(to_char(MIN(COALESCE(s.stats_reset, pg_postmaster_start_time())), 'YYYY-MM-DD HH24:MI:SS'), 'N/A') FROM pg_stat_database s JOIN pg_database d ON d.oid = s.datid WHERE d.datallowconn"
+
+        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, True)
+
+        if rc != SUCCESS:
+            return rc, "Unable to get connection churn statistics: %s" % results
+
+        try:
+            values = results.strip().split("|")
+
+            if len(values) != 3:
+                raise ValueError("Expected three values.")
+
+            total_sessions = int(values[0])
+            sessions_per_hour = float(values[1])
+            stats_reset = values[2]
+
+        except (ValueError, TypeError):
+            return ERROR, "Invalid connection churn statistics returned: %s" % results
+
+        result["count"] = total_sessions
+        result["message"] = "Sessions established: %s  Average session creation rate: %.2f per hour.  Statistics reset: %s" % (format(total_sessions, ","), sessions_per_hour, stats_reset)        
+
+        return SUCCESS, result
+        
 
     ###########################################################
     def check_connectionage(self):
@@ -1330,51 +1406,67 @@ class maint:
             "details": ""
         }
 
-        sql = "select count(*), coalesce(cast(extract(epoch from avg(now()-backend_start)) as integer), -1), count(*) filter (where now()-state_change <= interval '1 hour') from pg_stat_activity where backend_type = 'client backend' and state = 'idle' and backend_start is not null"
+        sql = "SELECT COUNT(*) FILTER (WHERE backend_type = 'client backend' AND pid <> pg_backend_pid() AND state = 'active'), " \
+              "COUNT(*) FILTER (WHERE backend_type = 'client backend' AND pid <> pg_backend_pid() AND state LIKE 'idle in transaction%'), " \
+              "COUNT(*) FILTER (WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()), " \
+              "COUNT(*) FILTER (WHERE backend_type = 'client backend' AND pid <> pg_backend_pid() AND backend_start >= now() - INTERVAL '2 minutes'), " \
+              "COUNT(*) FILTER (WHERE backend_type = 'client backend' AND pid <> pg_backend_pid() AND backend_start >= now() - INTERVAL '5 minutes'), " \
+              "COUNT(*) FILTER (WHERE backend_type = 'client backend' AND pid <> pg_backend_pid() AND backend_start >= now() - INTERVAL '15 minutes'), " \
+              "COUNT(*) FILTER (WHERE backend_type = 'client backend' AND state = 'idle' AND backend_start IS NOT NULL), " \
+              "COALESCE(CAST(EXTRACT(EPOCH FROM AVG(now() - backend_start) FILTER (WHERE backend_type = 'client backend' AND state = 'idle' AND backend_start IS NOT NULL)) AS integer), -1), " \
+              "COUNT(*) FILTER (WHERE backend_type = 'client backend' AND state = 'idle' AND backend_start IS NOT NULL AND now() - state_change <= INTERVAL '1 hour') " \
+              "FROM pg_stat_activity"
 
         cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
         rc, results = self.executecmd(cmd, True)
 
         if rc != SUCCESS:
-            return rc, "Unable to get idle connection statistics: %s" % results
+            return rc, "Unable to get connection age statistics: %s" % results
 
         try:
             values = results.strip().split("|")
 
-            if len(values) != 3:
-                raise ValueError("Expected three values.")
+            if len(values) != 9:
+                raise ValueError("Expected nine values.")
 
-            idle_connections = int(values[0])
-            avgsecs = int(values[1])
-            recent_activity = int(values[2])
+            active_connections = int(values[0])
+            idle_in_transaction = int(values[1])
+            current_sessions = int(values[2])
+            started_2mins = int(values[3])
+            started_5mins = int(values[4])
+            started_15mins = int(values[5])
+            idle_connections = int(values[6])
+            avgsecs = int(values[7])
+            recent_activity = int(values[8])
 
         except (ValueError, TypeError):
-            return ERROR, "Invalid idle connection statistics returned: %s" % results
+            return ERROR, "Invalid connection age statistics returned: %s" % results
 
         stale_connections = idle_connections - recent_activity
 
         result["count"] = stale_connections
 
         if idle_connections == 0:
-            result["message"] = "No idle client connections found."
+            result["message"] = "Active: %d.  Idle in Trans: %d.  %d current connections.  Started (last 2 mins): %d.  Started (last 5 mins): %d.  Started (last 15 mins): %d.  No idle client connections found." \
+                                % (active_connections, idle_in_transaction, current_sessions, started_2mins, started_5mins, started_15mins)
             return SUCCESS, result
 
         avgmins = avgsecs / 60.0
         avgdays = avgsecs / 86400.0
 
-        result["message"] = "%d Idle connections and %d of them have recent activity.  Average connection age: %.2f days (%.0f minutes)." % (idle_connections, recent_activity, avgdays, avgmins)
+        result["message"] = "Active: %d.  Idle in Trans: %d.  %d current connections.  Started (last 2 mins): %d.  Started (last 5 mins): %d.  Started (last 15 mins): %d.  " \
+                            "%d idle connections and %d of them have recent activity.  Average idle age: %.2f days (%.0f minutes)." % \
+                            (active_connections, idle_in_transaction, current_sessions, started_2mins, started_5mins, started_15mins, idle_connections, recent_activity, avgdays, avgmins)
 
-        if stale_connections > 0:
+        stale_pct = (stale_connections / float(idle_connections)) * 100.0
+
+        if stale_pct >= 25.0:
             result["status"] = "WARNING"
-
-            if stale_connections == 1:
-                result["details"] = "1 idle connection has been inactive for more than 1 hour."
-            else:
-                result["details"] = "%d idle connections have been inactive for more than 1 hour." % stale_connections
-
+            result["details"] = "%d of %d idle connections (%.1f%%) have been inactive for more than 1 hour.  Warning threshold: 25%%." % (stale_connections, idle_connections, stale_pct)
+            
         return SUCCESS, result
-
-
+        
+        
     ###########################################################
     def check_orphanedlo(self):
 
@@ -1685,6 +1777,123 @@ class maint:
 
         return SUCCESS, result
 
+
+    ###########################################################
+    def check_configrecommendations(self):
+
+        result = {
+            "check": "configrecommendations",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        sql = "SELECT " \
+              "(SELECT setting FROM pg_settings WHERE name = 'autovacuum'), " \
+              "(SELECT setting FROM pg_settings WHERE name = 'checkpoint_completion_target'), " \
+              "current_setting('data_checksums'), " \
+              "(SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'), " \
+              "(SELECT setting FROM pg_settings WHERE name = 'log_checkpoints'), " \
+              "(SELECT setting FROM pg_settings WHERE name = 'log_lock_waits'), " \
+              "(SELECT setting FROM pg_settings WHERE name = 'log_min_duration_statement'), " \
+              "(SELECT setting FROM pg_settings WHERE name = 'log_temp_files'), " \
+              "EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_stat_statements'), " \
+              "'pg_stat_statements' = ANY(string_to_array(replace(current_setting('shared_preload_libraries'), ' ', ''), ',')), " \
+              "EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'), " \
+              "(SELECT setting FROM pg_settings WHERE name = 'track_activity_query_size')"
+
+        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, True)
+
+        if rc != SUCCESS:
+            return rc, "Unable to get PostgreSQL configuration recommendations: %s" % results
+
+        try:
+            values = results.strip().split("|")
+
+            if len(values) != 12:
+                raise ValueError("Expected twelve configuration values.")
+
+            autovacuum = values[0]
+            checkpoint_completion_target = float(values[1])
+            data_checksums = values[2]
+            idle_in_transaction_session_timeout = int(values[3])
+            log_checkpoints = values[4]
+            log_lock_waits = values[5]
+            log_min_duration_statement = int(values[6])
+            log_temp_files = int(values[7])
+            extension_available = values[8].lower() == "t"
+            extension_preloaded = values[9].lower() == "t"
+            extension_installed = values[10].lower() == "t"
+            track_activity_query_size = int(values[11])
+
+        except (ValueError, TypeError):
+            return ERROR, "Invalid PostgreSQL configuration values returned: %s" % results
+
+        details = []
+        warning_count = 0
+
+        if autovacuum != "on":
+            details.append("autovacuum is off.")
+            warning_count += 1
+
+        if checkpoint_completion_target <= 0.9:
+            details.append("checkpoint_completion_target is less than optimal (value=%s)." % values[1])
+            warning_count += 1
+
+        if data_checksums != "on":
+            details.append("data checksums are off.")
+            warning_count += 1
+
+        if idle_in_transaction_session_timeout == 0:
+            details.append("idle_in_transaction_session_timeout is turned off.")
+            warning_count += 1
+
+        if log_checkpoints != "on":
+            details.append("log_checkpoints is off.")
+            warning_count += 1
+
+        if log_lock_waits != "on":
+            details.append("log_lock_waits is off.")
+            warning_count += 1
+
+        if log_min_duration_statement == -1:
+            details.append("log_min_duration_statement is off.")
+            warning_count += 1
+
+        if log_temp_files == -1:
+            details.append("log_temp_files is off.")
+            warning_count += 1
+
+        if not extension_available:
+            details.append("pg_stat_statements is not available on this PostgreSQL server.")
+            warning_count += 1
+        elif not extension_preloaded:
+            if extension_installed:
+                details.append("pg_stat_statements is installed but not listed in shared_preload_libraries. A PostgreSQL restart is required after adding it.")
+            else:
+                details.append("pg_stat_statements is neither preloaded nor installed in this database.")
+            warning_count += 1
+        elif not extension_installed:
+            details.append("pg_stat_statements is preloaded but not installed in database '%s'. Run CREATE EXTENSION." % self.database)
+            warning_count += 1
+
+        if track_activity_query_size < 8192:
+            details.append("track_activity_query_size may need to be increased; query text may be truncated (value=%d). Changing this setting requires a PostgreSQL restart." % track_activity_query_size)
+            warning_count += 1
+
+        result["count"] = warning_count
+        result["details"] = "\n".join(details)
+
+        if warning_count:
+            result["status"] = "WARNING"
+            result["message"] = "%d PostgreSQL configuration recommendation(s) need attention." % warning_count
+        else:
+            result["message"] = "PostgreSQL configuration recommendations are satisfied."
+
+        return SUCCESS, result
+        
         
     ###########################################################
     def check_replication(self):
@@ -1841,21 +2050,23 @@ class maint:
         results = []
 
         checks = [
+            self.check_load,
+            self.check_datadirusage,
+            self.check_configrecommendations,
+            self.check_connectionchurn,
             self.check_waitslocks,
             self.check_idleintrans,
             self.check_idleconns,
             self.check_longquery,
-            self.check_load,
             self.check_activeconns,
+            self.check_connectionage,
             self.check_maxconns,
             self.check_cachehit,
             self.check_dbconflicts,
             self.check_checkpoints,
             self.check_bgwriter,
             self.check_unusedindexes,
-            self.check_connectionage,
             self.check_orphanedlo,
-            self.check_datadirusage,
             self.check_bloat_tables,
             self.check_bloat_indexes,
             self.check_maintenance_candidates,
@@ -1879,19 +2090,20 @@ class maint:
                 details = result["details"].splitlines()
                 print(marker + result["message"] + "  " + details[0])
 
-                for detail in details[1:]:
-                    print(MARK_WARN + detail)
+                if self.verbose:
+                    for detail in details[1:]:
+                        print(MARK_VERB + detail)
             else:
                 print(marker + result["message"])
 
                 if result["details"]:
-                    if result["check"] in ("bloat_tables", "bloat_indexes", "maintenance_candidates"):
+                    if result["check"] in ("bloat_tables", "bloat_indexes", "maintenance_candidates", "unusedindexes"):
                         if self.verbose:
                             for detail in result["details"].splitlines():
                                 print(MARK_VERB + detail)
                     else:
                         for detail in result["details"].splitlines():
-                            if result["check"] in ("checkpoints", "bgwriter"):
+                            if result["check"] in ("checkpoints", "bgwriter", "replication"):
                                 if self.verbose:
                                     print(MARK_VERB + detail)
                             elif result["status"] == "WARNING":
