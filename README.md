@@ -55,15 +55,19 @@ The following checks are performed by `pg_smartcheck`.
 | Database conflicts and temporary files | Reports database conflicts, deadlocks, temporary file counts, and temporary bytes. Conflicts and deadlocks raise a warning; temporary file usage raises a warning when it exceeds 1 GB and there are no conflicts or deadlocks. |
 | Cache hit ratio | Reports the current database cache hit ratio and warns when it is below 90%. |
 | Checkpoints | Evaluates checkpoint frequency, requested versus timed checkpoints, checkpoint write pacing and synchronization time, WAL generation relative to `max_wal_size`, and current checkpointer/background-writer wait events where available. |
-| Background writer | Compares background-writer activity with client-backend writing. The implementation supports PostgreSQL 15 and PostgreSQL 18; other versions report this check as informational. |
+| Background writer | Evaluates client-backend, background-writer, and checkpointer write activity, backend fsync queue-full events, and background-writer cleaning-limit activity. The implementation supports PostgreSQL 15 and PostgreSQL 18; other versions report this check as informational. |
 | Unused indexes | Identifies valid, ready, non-primary, non-unique, non-exclusion indexes larger than 8 KB that have no recorded scans or tuple activity. |
-| Idle connection age | Reports the number and average age of idle client connections, and identifies connections without activity in the previous hour. |
+| Idle connection age | Reports active, idle-in-transaction, and idle client connection counts, connection creation activity, and average idle connection age. Raises a warning when 25% or more of idle connections have been inactive for over 1 hour. |
 | Orphaned large objects | Uses `vacuumlo` in dry-run mode to identify large objects that would be removed. It never removes large objects. This check is not available on standby servers. |
 | Data directory usage | On a local non-RDS host, reports filesystem usage for the PostgreSQL data directory and warns when usage exceeds 75%. |
 | Table bloat | Estimates table and associated TOAST space usage. Reports tables with estimated bloat greater than 30% and estimated excess space greater than 100 MB. |
 | Index bloat | Estimates B-tree index bloat. Reports indexes larger than 50 MB with estimated bloat greater than 30%. |
 | Maintenance candidates | Reviews table statistics, dead-tuple and modification ratios, maintenance history, and transaction ID age to identify tables that may warrant maintenance attention. This is diagnostic only and does not run maintenance. |
 | Replication | Checks replication status and lag, using the built-in replication lag thresholds where applicable. |
+| Connection churn | Reports cumulative sessions established and the average session creation rate per hour. Requires PostgreSQL 14 or newer. |
+| Configuration recommendations | Reviews important PostgreSQL configuration settings, including autovacuum, checkpoint pacing, data checksums, logging, idle transaction timeout, pg_stat_statements, and query-text tracking capacity. |
+
+
 
 ### Important notes about the checks
 
@@ -106,13 +110,20 @@ Several checks use fixed thresholds in the current implementation.
 | Active connections | 2.5 sessions per vCPU |
 | Cache hit ratio | Warning below 90% |
 | OS load | Warning when load average exceeds 90% of the available CPU count |
-| Idle connection age | 240 minutes by default |
 | Idle connection recent activity | No activity in the previous 1 hour |
 | Data directory usage | Warning above 75% |
 | Table bloat | Greater than 30% and greater than 100 MB estimated excess |
 | Index bloat | Index larger than 50 MB and greater than 30% estimated bloat |
 | Temporary file usage | Warning above 1 GB when there are no conflicts or deadlocks |
 | Replication lag | 30 seconds or 256 MB, as applicable |
+| Idle connection age | Warning when 25% or more of idle connections have been inactive for over 1 hour |
+| Checkpoint interval | Warning when average interval is below 2 minutes or at least 30 minutes |
+| Checkpoint timeout | Warning when checkpoint_timeout is below 2 minutes or exceeds 30 minutes |
+| Background writer | Warning for backend fsync queue-full events, backend writes exceeding background-writer and checkpointer writes combined, or repeated cleaning-limit hits with substantial capacity usage |
+| Configuration recommendations | Warning for any unmet configuration recommendation |
+
+
+
 
 The wait/lock, long-running query, and idle-in-transaction checks are disabled unless their respective thresholds are supplied on the command line.
 
