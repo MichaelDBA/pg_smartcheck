@@ -251,6 +251,7 @@ The checks are deliberately diagnostic. A warning is a starting point for invest
 
 ## Sample Output
 
+```
 [INFO]  pg_smartcheck  version: 1.0  November 06, 2026     Python Version: 3     PG Database: mydbj
 [INFO]  OS load check not applicable for remote DB instances.
 [INFO]  N/A: PostgreSQL host is remote. Server filesystem usage is unavailable.
@@ -277,7 +278,7 @@ The checks are deliberately diagnostic. A warning is a starting point for invest
 [WARN]  Maintenance candidates detected: VACUUM/ANALYZE: 80, VACUUM: 4, ANALYZE: 5, FREEZE: 0
 [ OK ]  1 streaming replication connection(s) detected. No significant replication lag detected.
 [INFO]  HTML report generated: C:\mydirectory\pg_smartcheck_20261106_0940.html
-
+```
 
 
 
