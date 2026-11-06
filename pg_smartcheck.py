@@ -1447,15 +1447,14 @@ class maint:
         result["count"] = stale_connections
 
         if idle_connections == 0:
-            result["message"] = "Active: %d.  Idle in Trans: %d.  %d current connections.  Started (last 2 mins): %d.  Started (last 5 mins): %d.  Started (last 15 mins): %d.  No idle client connections found." \
+            result["message"] = "Active: %d.  Idle in Trans: %d.  %d current connections.  Started (last 2 mins): %d.  Started (last 5 mins): %d.  Started (last 15 mins): %d.\nNo idle client connections found." \
                                 % (active_connections, idle_in_transaction, current_sessions, started_2mins, started_5mins, started_15mins)
             return SUCCESS, result
-
+            
         avgmins = avgsecs / 60.0
         avgdays = avgsecs / 86400.0
 
-        result["message"] = "Active: %d.  Idle in Trans: %d.  %d current connections.  Started (last 2 mins): %d.  Started (last 5 mins): %d.  Started (last 15 mins): %d.  " \
-                            "%d idle connections and %d of them have recent activity.  Average idle age: %.2f days (%.0f minutes)." % \
+        result["message"] = "Active: %d.  Idle in Trans: %d.  %d current connections.  Started (last 2 mins): %d.  Started (last 5 mins): %d.  Started (last 15 mins): %d.\n%d idle connections and %d of them have recent activity.  Average idle age: %.2f days (%.0f minutes)." % \
                             (active_connections, idle_in_transaction, current_sessions, started_2mins, started_5mins, started_15mins, idle_connections, recent_activity, avgdays, avgmins)
 
         stale_pct = (stale_connections / float(idle_connections)) * 100.0
@@ -2094,7 +2093,8 @@ class maint:
                     for detail in details[1:]:
                         print(MARK_VERB + detail)
             else:
-                print(marker + result["message"])
+                for message in result["message"].splitlines():
+                    print(marker + message)                
 
                 if result["details"]:
                     if result["check"] in ("bloat_tables", "bloat_indexes", "maintenance_candidates", "unusedindexes"):
