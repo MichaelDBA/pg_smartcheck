@@ -61,6 +61,7 @@ The following checks are performed by `pg_smartcheck`.
 | Orphaned large objects | Uses `vacuumlo` in dry-run mode to identify large objects that would be removed. It never removes large objects. This check is not available on standby servers. |
 | Data directory usage | On a local non-RDS host, reports filesystem usage for the PostgreSQL data directory and warns when usage exceeds 75%. |
 | Table bloat | Estimates table and associated TOAST space usage. Reports tables with estimated bloat greater than 30% and estimated excess space greater than 100 MB. |
+| TOAST tables | Reports TOAST relation statistics, including physical size, live and dead tuples, and FSM free-space information when available. Helps identify TOAST storage that may warrant further investigation. |
 | Index bloat | Estimates B-tree index bloat. Reports indexes larger than 50 MB with estimated bloat greater than 30%. |
 | Maintenance candidates | Reviews table statistics, dead-tuple and modification ratios, maintenance history, and transaction ID age to identify tables that may warrant maintenance attention. This is diagnostic only and does not run maintenance. |
 | Replication | Checks replication status and lag, using the built-in replication lag thresholds where applicable. |
