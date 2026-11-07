@@ -45,6 +45,7 @@
 # ==========         =========      ==============================
 # Michael Vitale     11/05/2026     Initial development, consolidating pg_report and pg_check.
 # Michael Vitale     11/06/2026     Added more logic and refined it in context of BGWriter.
+# Michael Vitale     11/07/2026     Added toast table analysis.
 ###############################################################################
 
 import sys
@@ -78,8 +79,8 @@ HIGHLOAD  = 4
 DESCRIPTION = "Comprehensive PostgreSQL database health analysis, performance diagnostics, maintenance recommendations, and detailed reporting."
 VERSION     = 1.0
 PROGNAME    = "pg_smartcheck"
-ADATE       = "November 06, 2026"
-PROGDATE    = "2026-11-06"
+ADATE       = "November 07, 2026"
+PROGDATE    = "2026-11-07"
 MARK_OK     = "[ OK ]  "
 MARK_WARN   = "[WARN]  "
 MARK_INFO   = "[INFO]  "
@@ -1683,6 +1684,109 @@ class maint:
 
 
     ###########################################################
+    ###########################################################
+    def check_bloat_toast(self):
+
+        result = {
+            "check": "bloat_toast",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        extension_sql = "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_freespacemap')"
+        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, extension_sql)
+        rc, extension_result = self.executecmd(cmd, True)
+
+        if rc != SUCCESS:
+            return rc, "Unable to determine whether pg_freespacemap is installed: %s" % extension_result
+
+        has_freespacemap = extension_result.strip().lower() == "t"
+
+        if has_freespacemap:
+            sql = "WITH toast_tables AS (SELECT pn.nspname AS schemaname, parent.relname AS tablename, toast.oid AS toast_oid, " \
+                  "pg_relation_size(toast.oid) AS heap_bytes, pg_total_relation_size(toast.oid) AS total_bytes, " \
+                  "COALESCE(s.n_live_tup,0)::bigint AS live_tuples, COALESCE(s.n_dead_tup,0)::bigint AS dead_tuples " \
+                  "FROM pg_class parent JOIN pg_namespace pn ON pn.oid = parent.relnamespace JOIN pg_class toast ON toast.oid = parent.reltoastrelid " \
+                  "LEFT JOIN pg_stat_all_tables s ON s.relid = toast.oid WHERE parent.relkind IN ('r','m') " \
+                  "AND pn.nspname NOT IN ('pg_catalog','information_schema') AND pg_relation_size(toast.oid) > 100*1024*1024), " \
+                  "free_space AS (SELECT t.*, COALESCE(f.free_bytes,0)::bigint AS free_bytes FROM toast_tables t " \
+                  "LEFT JOIN LATERAL (SELECT sum(pg_freespace(t.toast_oid::regclass,g.blkno))::bigint AS free_bytes " \
+                  "FROM generate_series(0,(t.heap_bytes/current_setting('block_size')::bigint)-1) AS g(blkno)) f ON true), " \
+                  "evaluated AS (SELECT *, CASE WHEN heap_bytes > 0 THEN 100.0*free_bytes/heap_bytes ELSE 0 END AS free_pct, " \
+                  "CASE WHEN live_tuples+dead_tuples > 0 THEN 100.0*dead_tuples/(live_tuples+dead_tuples) ELSE 0 END AS dead_pct FROM free_space) " \
+                  "SELECT count(*) FILTER (WHERE (free_bytes > 100*1024*1024 AND free_pct > 30) OR dead_pct > 30), " \
+                  "COALESCE(sum(free_bytes) FILTER (WHERE free_bytes > 100*1024*1024 AND free_pct > 30),0)::bigint, " \
+                  "count(*) FILTER (WHERE dead_pct > 30), " \
+                  "COALESCE(string_agg(format('%I.%I: ',schemaname,tablename) || round(free_pct::numeric,1)::text || '% free space, ' || " \
+                  "round(free_bytes/1048576.0,1)::text || ' MB reusable, ' || round(dead_pct::numeric,1)::text || " \
+                  "'% estimated dead tuples, ' || dead_tuples::text || ' dead tuples, ' || " \
+                  "round(heap_bytes/1048576.0,1)::text || ' MB heap, ' || round(total_bytes/1048576.0,1)::text || " \
+                  "' MB total' || CASE WHEN dead_pct > 30 THEN ' [VACUUM recommended]' ELSE '' END, " \
+                  "E'\\n' ORDER BY schemaname,tablename) " \
+                  "FILTER (WHERE (free_bytes > 100*1024*1024 AND free_pct > 30) OR dead_pct > 30),'') FROM evaluated"
+        else:
+            sql = "WITH toast_tables AS (SELECT pn.nspname AS schemaname, parent.relname AS tablename, " \
+                  "pg_relation_size(toast.oid) AS heap_bytes, pg_total_relation_size(toast.oid) AS total_bytes, " \
+                  "COALESCE(s.n_live_tup,0)::bigint AS live_tuples, COALESCE(s.n_dead_tup,0)::bigint AS dead_tuples " \
+                  "FROM pg_class parent JOIN pg_namespace pn ON pn.oid = parent.relnamespace JOIN pg_class toast ON toast.oid = parent.reltoastrelid " \
+                  "LEFT JOIN pg_stat_all_tables s ON s.relid = toast.oid WHERE parent.relkind IN ('r','m') " \
+                  "AND pn.nspname NOT IN ('pg_catalog','information_schema') AND pg_relation_size(toast.oid) > 100*1024*1024), " \
+                  "evaluated AS (SELECT *, CASE WHEN live_tuples+dead_tuples > 0 THEN " \
+                  "100.0*dead_tuples/(live_tuples+dead_tuples) ELSE 0 END AS dead_pct FROM toast_tables) " \
+                  "SELECT count(*) FILTER (WHERE dead_pct > 30), 0::bigint, count(*) FILTER (WHERE dead_pct > 30), " \
+                  "COALESCE(string_agg(format('%I.%I: ',schemaname,tablename) || round(dead_pct::numeric,1)::text || " \
+                  "'% estimated dead tuples, ' || dead_tuples::text || ' dead tuples, ' || " \
+                  "round(heap_bytes/1048576.0,1)::text || ' MB heap, ' || round(total_bytes/1048576.0,1)::text || " \
+                  "' MB total [VACUUM recommended]', " \
+                  "E'\\n' ORDER BY schemaname,tablename) FILTER (WHERE dead_pct > 30),'') FROM evaluated"
+
+        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, True)
+        if rc != SUCCESS:
+            return rc, "Unable to get TOAST bloat statistics: %s" % results
+
+        try:
+            values = results.strip().split("|")
+
+            if len(values) != 4:
+                raise ValueError("Expected four values.")
+
+            bloated_toast_tables = int(values[0])
+            reusable_bytes = int(values[1])
+            vacuum_tables = int(values[2])
+            toast_details = values[3]
+
+        except (ValueError, TypeError):
+            return ERROR, "Invalid TOAST bloat statistics returned: %s" % results
+
+        result["count"] = bloated_toast_tables
+        result["details"] = toast_details
+
+        if has_freespacemap:
+            if vacuum_tables > 0:
+                reusable_mb = reusable_bytes / 1024.0 / 1024.0
+                result["status"] = "WARNING"
+                result["message"] = "%d TOAST table(s) have elevated estimated dead-tuple ratios. VACUUM recommended. Estimated reusable space: %.1f MB." % (vacuum_tables, reusable_mb)
+            elif bloated_toast_tables > 0:
+                reusable_mb = reusable_bytes / 1024.0 / 1024.0
+                result["status"] = "WARNING"
+                result["message"] = "%d TOAST table(s) have significant reusable free space. VACUUM is not recommended based on free space alone. Estimated reusable space: %.1f MB." % (bloated_toast_tables, reusable_mb)
+            else:
+                result["message"] = "No significant TOAST free-space bloat or elevated dead-tuple ratios detected (pg_freespacemap available)."
+        else:
+            if vacuum_tables > 0:
+                result["status"] = "WARNING"
+                result["message"] = "%d TOAST table(s) have elevated estimated dead-tuple ratios. VACUUM recommended. pg_freespacemap is unavailable; free-space estimates cannot be reported." % vacuum_tables
+            else:
+                result["status"] = "INFO"
+                result["message"] = "No elevated TOAST dead-tuple ratios detected. pg_freespacemap is unavailable; using the reduced-information fallback."
+
+        return SUCCESS, result
+        
+        
+    ###########################################################
     def check_maintenance_candidates(self):
 
         result = {
@@ -2069,6 +2173,7 @@ class maint:
             self.check_bloat_tables,
             self.check_bloat_indexes,
             self.check_maintenance_candidates,
+            self.check_bloat_toast,
             self.check_replication
         ]        
         
@@ -2097,7 +2202,7 @@ class maint:
                     print(marker + message)                
 
                 if result["details"]:
-                    if result["check"] in ("bloat_tables", "bloat_indexes", "maintenance_candidates", "unusedindexes"):
+                    if result["check"] in ("bloat_tables", "bloat_indexes", "bloat_toast", "maintenance_candidates", "unusedindexes"):
                         if self.verbose:
                             for detail in result["details"].splitlines():
                                 print(MARK_VERB + detail)
