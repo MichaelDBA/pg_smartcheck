@@ -22,7 +22,7 @@ The utility supports Windows and Linux. Certain operating-system-specific checks
 
 ## History
 
-The first version of `pg_smartcheck` was created in November 2026 by consolidating functionality from the original `pg_report` and `pg_check` utilities.
+The first version of `pg_smartcheck` was created in November 2026 by consolidating functionality from my original `pg_report` and `pg_check` utilities.
 
 ## Overview
 
