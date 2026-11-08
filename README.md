@@ -1,4 +1,4 @@
-<img align="right" width="220" alt="pg_smartcheck mascot" src="images/pg_smartcheck_mascot.png" />
+<img align="right" width="200" alt="pg_smartcheck mascot" src="images/pg_smartcheck_mascot.png" />
 
 # pg_smartcheck
 
