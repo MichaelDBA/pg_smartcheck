@@ -45,7 +45,7 @@
 # ==========         =========      ==============================
 # Michael Vitale     11/05/2026     Initial development, consolidating pg_report and pg_check.
 # Michael Vitale     11/06/2026     Added more logic and refined it in context of BGWriter.
-# Michael Vitale     11/07/2026     Added toast table analysis.
+# Michael Vitale     11/07/2026     Added toast table analysis. Reuse connections.
 ###############################################################################
 
 import sys
@@ -62,6 +62,7 @@ from datetime import datetime
 from decimal import Decimal
 from subprocess import Popen, PIPE
 from optparse import OptionParser
+import psycopg2
 
 #############################################################################################
 # GLOBALS
@@ -123,10 +124,12 @@ class maint:
         self.database          = ""
         self.dbpass            = ""
         self.schema            = ""
+        self.opsys             = ""
         self.connstring        = ""
+        self.connection        = None
         self.local             = False
         self.connected         = False
-        self.opsys             = ""
+        
 
         # Monitoring and alert options inherited from pg_check.py.
         self.waitslocks        = -1
@@ -245,7 +248,32 @@ class maint:
 
         return SUCCESS, (values if values else err)
         
-        
+
+    ###########################################################
+    def executesql(self, sql, expect=True):
+
+        if not self.connection or self.connection.closed:
+            return ERROR, "PostgreSQL connection is not available."
+
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(sql)
+
+                if cursor.description is None:
+                    return SUCCESS, ""
+
+                rows = cursor.fetchall()
+                results = "\n".join("|".join("" if value is None else str(value) for value in row) for row in rows)
+
+                if not results and expect:
+                    return ERROR3, "[ERROR] return set is empty"
+
+                return SUCCESS, results
+
+        except psycopg2.Error as e:
+            return ERROR2, str(e).strip()
+            
+            
     ###########################################################
     def get_configinfo(self):
 
@@ -315,9 +343,7 @@ class maint:
     def get_pgversion(self):
 
         sql = "select trim(substring(version(), 12, position(' ' in substring(version(),12)))) || '-' || substring(foo.major from 12 for 3) as major from (select version() as major) foo"
-        cmd = "psql -X %s -At -c \"%s\"" % (self.connstring, sql)
-
-        rc, results = self.executecmd(cmd, True)
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to determine PostgreSQL version: %s" % results
 
@@ -373,12 +399,10 @@ class maint:
                "AND a.state = 'active' AND a.backend_type <> 'walsender' " \
                "AND now() - a.query_start > interval '%d seconds'" % self.waitslocks               
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql1)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql1, True)
         if rc != SUCCESS:
             return rc, "Unable to get count of waiting queries: %s" % results
-
+            
         try:
             blocked_queries_cnt = int(results.strip())
         except ValueError:
@@ -393,18 +417,14 @@ class maint:
         result["status"] = "WARNING"
         result["message"] = "%d waiting/blocked queries longer than %d seconds were detected." % (blocked_queries_cnt, self.waitslocks)
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql2)
-        rc, results2 = self.executecmd(cmd, False)
-
+        rc, results2 = self.executesql(sql2, False)
         if rc != SUCCESS:
             results2 = ""
-
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql3)
-        rc, results3 = self.executecmd(cmd, False)
-
+            
+        rc, results3 = self.executesql(sql3, False)
         if rc != SUCCESS:
             results3 = ""
-
+            
         result["details"] = (results2 or "") + "\n" + (results3 or "")
 
         if not result["details"].strip():
@@ -432,12 +452,10 @@ class maint:
 
         sql2 = "select 'pid=' || pid || '  db=' || coalesce(datname, 'N/A') || '  user=' || coalesce(usename, 'N/A') || '  app=' || coalesce(application_name, 'N/A') || '  clientip=' || coalesce(client_addr::text, 'N/A') || '  duration=' || round(EXTRACT(EPOCH FROM (now() - state_change)) / 60)::integer || ' mins' from pg_stat_activity where state = 'idle in transaction' and now() - state_change > interval '%d minutes'" % self.idleintransmins
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql1)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql1, True)
         if rc != SUCCESS:
             return rc, "Unable to get count of idle-in-transaction connections: %s" % results
-
+            
         try:
             idle_intrans_cnt = int(results.strip())
         except ValueError:
@@ -452,12 +470,10 @@ class maint:
         result["status"] = "WARNING"
         result["message"] = "%d \"idle in transaction\" sessions longer than %d minute(s) were detected." % (idle_intrans_cnt, self.idleintransmins)
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql2)
-        rc, details = self.executecmd(cmd, False)
-
+        rc, details = self.executesql(sql2, False)
         if rc == SUCCESS:
             result["details"] = details or ""
-
+            
         if not result["details"].strip():
             result["message"] += " Details are no longer available."
 
@@ -483,12 +499,10 @@ class maint:
 
         sql2 = "select 'pid=' || pid || '  db=' || coalesce(datname, 'N/A') || '  user=' || coalesce(usename, 'N/A') || '  app=' || coalesce(application_name, 'N/A') || '  clientip=' || coalesce(client_addr::text, 'N/A') || '  idle=' || round(EXTRACT(EPOCH FROM (now() - state_change)) / 60)::integer || ' mins' from pg_stat_activity where state = 'idle' and now() - state_change > interval '%d minutes'" % self.idleconnmins
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql1)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql1, True)
         if rc != SUCCESS:
             return rc, "Unable to get count of idle connections: %s" % results
-
+            
         try:
             idle_connections_cnt = int(results.strip())
         except ValueError:
@@ -503,12 +517,10 @@ class maint:
         result["status"] = "WARNING"
         result["message"] = "%d idle connections older than %d minute(s) were detected." % (idle_connections_cnt, self.idleconnmins)
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql2)
-        rc, details = self.executecmd(cmd, False)
-
+        rc, details = self.executesql(sql2, False)
         if rc == SUCCESS:
             result["details"] = details or ""
-
+            
         if not result["details"].strip():
             result["message"] += " Details are no longer available."
 
@@ -536,12 +548,10 @@ class maint:
 
         sql2 = "select 'pid=' || pid || '  db=' || coalesce(datname, 'N/A') || '  user=' || coalesce(usename, 'N/A') || '  app=' || coalesce(application_name, 'N/A') || '  minutes=' || cast(EXTRACT(EPOCH FROM (now() - query_start)) as integer) / 60 || E'\\n' || 'sql=' || regexp_replace(replace(regexp_replace(query, E'[\\n\\r]+', ' ', 'g'), '    ', ''), '[^\\x20-\\x7f\\x0d\\x1b]', '', 'g') || E'\\n\\n' from pg_stat_activity where backend_type <> 'walsender' and state not ilike 'idle%%' and query <> '' and now() - query_start > interval '%d minutes'" % self.longquerymins
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql1)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql1, True)
         if rc != SUCCESS:
             return rc, "Unable to get count of long-running queries: %s" % results
-
+            
         try:
             long_queries_cnt = int(results.strip())
         except ValueError:
@@ -556,13 +566,11 @@ class maint:
         result["status"] = "WARNING"
         result["message"] = "%d long-running queries longer than %d minute(s) were detected." % (long_queries_cnt, self.longquerymins)
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql2)
-        rc, details = self.executecmd(cmd, False)
-
+        rc, details = self.executesql(sql2, False)
         if rc != SUCCESS:
             return rc, "Unable to get details for long-running queries: %s" % details
-
-        result["details"] = details or ""
+            
+        result["details"] = (details or "").rstrip()
 
         if not result["details"].strip():
             result["message"] += " Details are no longer available."
@@ -676,9 +684,7 @@ class maint:
         threshold = Decimal(str(vcpus)) * Decimal("2.5")
 
         sql = "select count(*) from pg_stat_activity WHERE backend_type = 'client backend' AND state in ('active', 'idle in transaction')"
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get active connection count: %s" % results
 
@@ -719,12 +725,10 @@ class maint:
             sql = "select (select setting::integer from pg_settings where name = 'max_connections'), coalesce((select setting::integer from pg_settings where name = 'superuser_reserved_connections'), 0), 0,  "\
                   "(select count(*) from pg_stat_activity where backend_type = 'client backend')"        
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get PostgreSQL connection utilization: %s" % results
-
+            
         try:
             values = results.strip().split("|")
 
@@ -778,12 +782,10 @@ class maint:
         else:
             sql = "select conflicts, deadlocks, temp_files, temp_bytes, coalesce(stats_reset::text, 'N/A') from pg_stat_database where datname = current_database()"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get database conflict statistics: %s" % results
-
+            
         try:
             values = results.strip().split("|")
 
@@ -845,12 +847,10 @@ class maint:
 
         sql = "select blks_read, blks_hit, round((blks_hit::float/(blks_read+blks_hit+1)*100)::numeric, 2) as cachehitratio from pg_stat_database where datname = current_database()"        
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get database cache hit ratio: %s" % results
-
+            
         try:
             cols = results.strip().split("|")
 
@@ -897,12 +897,10 @@ class maint:
         else:
             sql = "select checkpoints_timed, checkpoints_req, coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0), checkpoint_write_time, checkpoint_sync_time from pg_stat_bgwriter"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get checkpoint statistics: %s" % results
-
+            
         try:
             values = results.strip().split("|")
 
@@ -922,12 +920,10 @@ class maint:
 
         sql = "select current_setting('checkpoint_timeout'), current_setting('max_wal_size'), pg_size_bytes(current_setting('max_wal_size')), current_setting('checkpoint_completion_target')"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get checkpoint configuration: %s" % results
-
+            
         try:
             values = results.strip().split("|")
 
@@ -974,16 +970,11 @@ class maint:
         expected_write_secs = avg_interval_secs * completion_target
         pacing_pct = avg_write_secs / expected_write_secs * 100.0 if expected_write_secs > 0 else 0.0
 
-        # Get WAL generation statistics where supported.
+         # Get WAL generation statistics where supported.
         wal_mb_per_hour = None
-
         if self.pgversionmajor >= Decimal("14.0"):
-
             sql = "select coalesce(wal_bytes, 0), coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0) from pg_stat_wal"
-
-            cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-            rc, results = self.executecmd(cmd, True)
-
+            rc, results = self.executesql(sql, True)
             if rc == SUCCESS:
                 try:
                     values = results.strip().split("|")
@@ -1001,16 +992,13 @@ class maint:
                     wal_mb_per_hour = None
 
         # Get a snapshot of checkpointer and background writer wait events.
-
         wait_events = {}
 
         if self.pgversionmajor >= Decimal("10.0"):
 
             sql = "select backend_type, coalesce(wait_event_type, 'N/A'), coalesce(wait_event, 'N/A') from pg_stat_activity where backend_type in ('checkpointer', 'background writer') order by backend_type"
 
-            cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-            rc, results = self.executecmd(cmd, True)
-
+            rc, results = self.executesql(sql, True)
             if rc == SUCCESS:
                 for line in results.strip().splitlines():
                     values = line.split("|")
@@ -1019,7 +1007,6 @@ class maint:
                         wait_events[values[0]] = values[2]
 
         # Evaluate checkpoint configuration and activity.
-
         warnings = []
 
         if timeout_secs < 120:
@@ -1137,14 +1124,9 @@ class maint:
         maxwritten_elapsed_secs = 0
 
         # PostgreSQL 15: Use cumulative buffer counters.
-
         if self.pgversionmajor == Decimal("15.0"):
-
             sql = "select buffers_clean, buffers_backend, buffers_backend_fsync, maxwritten_clean, buffers_checkpoint, coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0), current_setting('block_size')::bigint from pg_stat_bgwriter"
-
-            cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-            rc, results = self.executecmd(cmd, True)
-
+            rc, results = self.executesql(sql, True)
             if rc != SUCCESS:
                 return rc, "Unable to get background writer statistics: %s" % results
 
@@ -1174,7 +1156,6 @@ class maint:
                 return ERROR, "Invalid background writer statistics returned: %s" % results
 
         # PostgreSQL 18: Use pg_stat_io and pg_stat_checkpointer.
-
         elif self.pgversionmajor == Decimal("18.0"):
 
             sql = "select io.backend_bytes, io.elapsed_secs, bg.buffers_clean, bg.maxwritten_clean, bg.elapsed_secs, cp.buffers_written, cp.elapsed_secs, current_setting('block_size')::bigint " \
@@ -1183,9 +1164,7 @@ class maint:
                   "cross join (select buffers_clean, maxwritten_clean, coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0) as elapsed_secs from pg_stat_bgwriter) bg " \
                   "cross join (select buffers_written, coalesce(extract(epoch from (clock_timestamp() - stats_reset)), 0) as elapsed_secs from pg_stat_checkpointer) cp"
 
-            cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-            rc, results = self.executecmd(cmd, True)
-
+            rc, results = self.executesql(sql, True)
             if rc != SUCCESS:
                 return rc, "Unable to get background writer and I/O statistics: %s" % results
 
@@ -1214,14 +1193,12 @@ class maint:
 
             except (ValueError, TypeError):
                 return ERROR, "Invalid background writer and I/O statistics returned: %s" % results
-
         else:
             result["status"] = "INFO"
             result["message"] = "Background writer monitoring currently supports PostgreSQL 15 and 18."
             return SUCCESS, result
 
         # Calculate write percentages and background writer limit rate.
-
         total_write_rate = backend_write_rate + bgwriter_write_rate + checkpoint_write_rate
 
         backend_write_pct = backend_write_rate / total_write_rate * 100.0 if total_write_rate > 0 else 0.0
@@ -1231,15 +1208,10 @@ class maint:
         maxwritten_rate = maxwritten_clean / maxwritten_elapsed_secs * 60.0 if maxwritten_elapsed_secs > 0 else 0.0
 
         # Get background writer configuration.
-
         sql = "select current_setting('bgwriter_lru_multiplier'), current_setting('bgwriter_lru_maxpages'), current_setting('bgwriter_delay'), current_setting('shared_buffers')"
-
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get background writer configuration: %s" % results
-
         try:
             values = results.strip().split("|")
 
@@ -1319,12 +1291,9 @@ class maint:
 
         sql = "SELECT count(*) FROM pg_stat_user_indexes JOIN pg_index USING(indexrelid) WHERE idx_scan = 0 AND idx_tup_read = 0 AND idx_tup_fetch = 0 AND NOT indisprimary AND NOT indisunique AND NOT indisexclusion AND indisvalid AND indisready AND pg_relation_size(indexrelid) > 8192"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get unused indexes count: %s" % results
-
         try:
             unused_indexes_cnt = int(results.strip())
         except ValueError:
@@ -1343,9 +1312,7 @@ class maint:
                       "' (' || pg_size_pretty(pg_relation_size(indexrelid)) || ')' FROM pg_stat_user_indexes JOIN pg_index USING(indexrelid) WHERE idx_scan = 0 AND idx_tup_read = 0 AND " \
                       "idx_tup_fetch = 0 AND NOT indisprimary AND NOT indisunique AND NOT indisexclusion AND indisvalid AND indisready AND pg_relation_size(indexrelid) > 8192 ORDER BY schemaname, relname, indexrelname"
 
-                cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-                rc, details = self.executecmd(cmd, False)
-
+                rc, details = self.executesql(sql, False)
                 if rc == SUCCESS:
                     result["details"] = details or ""
 
@@ -1371,9 +1338,7 @@ class maint:
         sql = "SELECT COALESCE(SUM(s.sessions), 0), COALESCE(ROUND(SUM(s.sessions::numeric / NULLIF(EXTRACT(EPOCH FROM (now() - COALESCE(s.stats_reset, pg_postmaster_start_time()))) / 3600.0, 0)), 2), 0), " \
               "COALESCE(to_char(MIN(COALESCE(s.stats_reset, pg_postmaster_start_time())), 'YYYY-MM-DD HH24:MI:SS'), 'N/A') FROM pg_stat_database s JOIN pg_database d ON d.oid = s.datid WHERE d.datallowconn"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)        
         if rc != SUCCESS:
             return rc, "Unable to get connection churn statistics: %s" % results
 
@@ -1418,9 +1383,7 @@ class maint:
               "COUNT(*) FILTER (WHERE backend_type = 'client backend' AND state = 'idle' AND backend_start IS NOT NULL AND now() - state_change <= INTERVAL '1 hour') " \
               "FROM pg_stat_activity"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get connection age statistics: %s" % results
 
@@ -1480,14 +1443,11 @@ class maint:
 
         # Large object cleanup cannot be checked on a standby.
         sql = "select pg_is_in_recovery()"
-
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)        
         if rc != SUCCESS:
             return rc, "Unable to determine database recovery status: %s" % results
 
-        if results.strip().lower() == "t":
+        if results.strip().lower() in ("t", "true"):
             result["status"] = "INFO"
             result["count"] = -1
             result["message"] = "N/A: Unable to detect orphaned large objects on standby servers."
@@ -1604,9 +1564,7 @@ class maint:
               "coalesce(string_agg(format('%I.%I', schemaname, tablename), ', ' ORDER BY schemaname, tablename), '') " \
               "FROM final_calc WHERE tbl_bloat_pct > 30 AND ((heappages+toastpages-est_tblpages_ff)*bs) > 100*1024*1024"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get table bloat statistics: %s" % results
 
@@ -1649,10 +1607,7 @@ class maint:
         }
 
         sql = "WITH index_cols AS (SELECT i.indexrelid, SUM(COALESCE(s.avg_width, 8)) AS avg_col_width FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace CROSS JOIN LATERAL unnest(i.indkey) AS k(attnum) JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum LEFT JOIN pg_stats s ON s.schemaname = n.nspname AND s.tablename = t.relname AND s.attname = a.attname WHERE k.attnum > 0 GROUP BY i.indexrelid), index_info AS (SELECT n.nspname AS schemaname, ct.relname AS tablename, ci.relname AS indexname, ci.oid AS idxoid, COALESCE((regexp_match(array_to_string(ci.reloptions, ','), 'fillfactor=([0-9]+)'))[1]::int, 90) AS fillfactor, ci.reltuples, pg_relation_size(ci.oid) AS real_size_bytes, COALESCE(ic.avg_col_width,0) AS avg_col_width, (t.n_tup_ins + t.n_tup_upd + t.n_tup_del)::bigint AS total_writes, s.idx_scan::bigint AS scans FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid JOIN pg_class ct ON ct.oid = i.indrelid JOIN pg_namespace n ON n.oid = ct.relnamespace JOIN pg_stat_all_indexes s ON s.indexrelid = i.indexrelid JOIN pg_stat_user_tables t ON t.relid = i.indrelid LEFT JOIN index_cols ic ON ic.indexrelid = i.indexrelid WHERE ci.relam = (SELECT oid FROM pg_am WHERE amname = 'btree') AND n.nspname NOT IN ('pg_catalog','information_schema')), calc AS (SELECT *, (reltuples * (avg_col_width + 24 + 8))::bigint AS estimated_needed_bytes FROM index_info), evaluated AS (SELECT *, GREATEST(real_size_bytes - estimated_needed_bytes,0) AS estimated_bloat_bytes, ROUND(100 * GREATEST(real_size_bytes - estimated_needed_bytes,0)::numeric / NULLIF(real_size_bytes,0), 1) AS bloat_pct FROM calc) SELECT count(*) FILTER (WHERE real_size_bytes > 50*1024*1024 AND bloat_pct > 30), coalesce(sum(estimated_bloat_bytes) FILTER (WHERE real_size_bytes > 50*1024*1024 AND bloat_pct > 30),0)::bigint, coalesce(string_agg(format('%I.%I', schemaname, indexname), ', ' ORDER BY schemaname, indexname) FILTER (WHERE real_size_bytes > 50*1024*1024 AND bloat_pct > 30), '') FROM evaluated"
-
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get index bloat statistics: %s" % results
 
@@ -1684,7 +1639,6 @@ class maint:
 
 
     ###########################################################
-    ###########################################################
     def check_bloat_toast(self):
 
         result = {
@@ -1696,13 +1650,11 @@ class maint:
         }
 
         extension_sql = "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_freespacemap')"
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, extension_sql)
-        rc, extension_result = self.executecmd(cmd, True)
-
+        rc, extension_result = self.executesql(extension_sql, True)
         if rc != SUCCESS:
             return rc, "Unable to determine whether pg_freespacemap is installed: %s" % extension_result
 
-        has_freespacemap = extension_result.strip().lower() == "t"
+        has_freespacemap = extension_result.strip().lower() in ("t", "true")
 
         if has_freespacemap:
             sql = "WITH toast_tables AS (SELECT pn.nspname AS schemaname, parent.relname AS tablename, toast.oid AS toast_oid, " \
@@ -1742,8 +1694,7 @@ class maint:
                   "' MB total [VACUUM recommended]', " \
                   "E'\\n' ORDER BY schemaname,tablename) FILTER (WHERE dead_pct > 30),'') FROM evaluated"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get TOAST bloat statistics: %s" % results
 
@@ -1829,9 +1780,7 @@ class maint:
               "COALESCE(string_agg(format('%I.%I', schemaname, tablename), ', ' ORDER BY schemaname, tablename) FILTER (WHERE freeze_due), '') " \
               "FROM evaluated"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to get maintenance candidate statistics: %s" % results
 
@@ -1906,9 +1855,7 @@ class maint:
               "EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements'), " \
               "(SELECT setting FROM pg_settings WHERE name = 'track_activity_query_size')"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)        
         if rc != SUCCESS:
             return rc, "Unable to get PostgreSQL configuration recommendations: %s" % results
 
@@ -2011,23 +1958,18 @@ class maint:
 
         sql = "select pg_is_in_recovery()"
 
-        cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
+        rc, results = self.executesql(sql, True)        
 
         if rc != SUCCESS:
             result["status"] = "INFO"
             result["message"] = "Replication status unavailable: %s" % results
             return SUCCESS, result
 
-        in_recovery = results.strip().lower() == "t"
-
+        in_recovery = results.strip().lower() in ("t", "true")
         if in_recovery:
 
             sql = "select status || '|' || coalesce(received_lsn::text, 'N/A') || '|' || coalesce(latest_end_lsn::text, 'N/A') || '|' || coalesce(extract(epoch from (clock_timestamp() - last_msg_receipt_time))::text, '-1') from pg_stat_wal_receiver"
-
-            cmd = "psql %s -At -X -c \"%s\"" % (self.connstring, sql)
-            rc, results = self.executecmd(cmd, False)
-
+            rc, results = self.executesql(sql, False)            
             if rc != SUCCESS:
                 result["status"] = "INFO"
                 result["message"] = "Standby detected, but WAL receiver status is unavailable."
@@ -2072,9 +2014,7 @@ class maint:
               "coalesce(extract(epoch from replay_lag)::text, 'N/A'), coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), " \
               "replay_lsn)::text, 'N/A')), E'\\n'), '') from pg_stat_replication"
               
-        cmd = "psql %s -At -F \"|\" -X -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, False)            
         if rc != SUCCESS:
             result["status"] = "INFO"
             result["message"] = "Primary detected, but replication status is unavailable: %s" % results
@@ -2218,7 +2158,9 @@ class maint:
                                 
             results.append(result)
 
-        return SUCCESS, results    
+        print(MARK_INFO + "%d checks completed successfully." % len(results))
+
+        return SUCCESS, results        
 
 
     ###########################################################
@@ -2586,10 +2528,25 @@ class maint:
 
         self.pgbindir = os.path.dirname(psql_path)
 
+        try:
+            self.connection = psycopg2.connect(
+                dbname=self.database,
+                user=self.dbuser or None,
+                host=self.dbhost or None,
+                port=self.dbport or None,
+                application_name="pg_smartcheck",
+                connect_timeout=10
+            )
+            self.connection.autocommit = True
+            self.connected = True
+
+        except psycopg2.Error as e:
+            return ERROR, "Unable to connect to PostgreSQL database '%s': %s" % (self.database, e)
+
         rc, results = self.get_pgversion()
         if rc != SUCCESS:
             return rc, results
-
+            
         rc, results = self.get_configinfo()
         if rc != SUCCESS:
             return rc, results
@@ -2599,12 +2556,11 @@ class maint:
             print("WARNING: Unable to determine pg_config bindir: %s" % results)
 
         if self.verbose:
-            print("[VERB]  shared_buffers=%s MB maintenance_work_mem=%s MB work_mem=%s MB shared_preload_libraries=%s PG Bind Directory=%s" % (self.shared_buffers, self.maint_work_mem, self.work_mem, self.shared_preload_libraries, self.pgbindir))            
+            print("[VERB]  PG Version=%s  shared_buffers=%s MB  maintenance_work_mem=%s MB  work_mem=%s MB  shared_preload_libraries=%s PG Bind Directory=%s" \
+                  % (str(self.pgversionminor), self.shared_buffers, self.maint_work_mem, self.work_mem, self.shared_preload_libraries, self.pgbindir))            
 
         sql = "SELECT 1"
-        cmd = "psql -X %s -At -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, True)
-
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to connect to PostgreSQL database '%s': %s" % (self.database, results)
 
@@ -2635,9 +2591,7 @@ class maint:
     def get_datadir(self):
 
         sql = "show data_directory"
-        cmd = "psql -X %s -At -c \"%s\"" % (self.connstring, sql)
-
-        rc, results = self.executecmd(cmd, True)
+        rc, results = self.executesql(sql, True)
         if rc != SUCCESS:
             return rc, "Unable to determine PostgreSQL data directory: %s" % results
 
@@ -2649,12 +2603,19 @@ class maint:
             print("PG WAL Directory = %s" % self.waldir)
 
         return SUCCESS, self.datadir
-
+        
 
     ###########################################################
     def cleanup(self):
-        if self.connected:
-            self.connected = False
+        if self.connection:
+            try:
+                self.connection.close()
+            except psycopg2.Error:
+                pass
+            self.connection = None
+
+        self.connected = False
+
         if self.tempfile and os.path.isfile(self.tempfile):
             try:
                 os.remove(self.tempfile)
