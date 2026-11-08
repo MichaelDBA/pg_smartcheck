@@ -65,9 +65,17 @@ The following checks are performed by `pg_smartcheck`.
 | Index bloat | Estimates B-tree index bloat. Reports indexes larger than 50 MB with estimated bloat greater than 30%. |
 | Maintenance candidates | Reviews table statistics, dead-tuple and modification ratios, maintenance history, and transaction ID age to identify tables that may warrant maintenance attention. This is diagnostic only and does not run maintenance. |
 | Replication | Checks replication status and lag, using the built-in replication lag thresholds where applicable. |
+| Replication slot health | Reports replication slot details, including slot type, database, activity, retained WAL, WAL status, and transaction ID horizons. Warns about lost or extended WAL reservations, exhausted safe WAL retention, and slot horizons approaching transaction ID freeze limits. |
+| XID and MultiXact health | Checks transaction ID and MultiXact ages across databases. Raises warnings at 80% and critical alerts at 95% of the configured freeze limits. |
+| Sequence exhaustion | Identifies sequences approaching their maximum or minimum values, supporting both ascending and descending sequences. Raises warnings at 80% and critical alerts at 95%. Also reports unavailable current values and cycle-enabled sequences. |
+| Prepared transactions | Identifies outstanding prepared transactions and reports their GID, database, owner, preparation timestamp, and age. Raises a warning whenever prepared transactions are present. |
+| Invalid indexes | Identifies indexes that are invalid or not ready. Reports index validity, readiness, liveness, uniqueness, and definition to assist with investigation and possible reindexing. |
+| WAL archiving health | Reports WAL archiving configuration and activity, including successful and failed archive counts, the latest archived files, and failure information. Identifies missing configuration and unresolved archiving failures. |
+| Replication configuration | Reviews replication-related configuration, including `wal_level`, `max_wal_senders`, `max_replication_slots`, synchronous replication, and `hot_standby`. |
+| Foreign key indexing | Identifies foreign keys without a suitable supporting B-tree index on the referencing table. Considers index validity, readiness, partial indexes, expression indexes, and leading key column order. |
+| Unlogged tables | Identifies user-defined unlogged tables. Reports them as informational findings because their data is not WAL-logged, is not replicated to physical standbys, and is truncated after a crash. |
 | Connection churn | Reports cumulative sessions established and the average session creation rate per hour. Requires PostgreSQL 14 or newer. |
 | Configuration recommendations | Reviews important PostgreSQL configuration settings, including autovacuum, checkpoint pacing, data checksums, logging, idle transaction timeout, pg_stat_statements, and query-text tracking capacity. |
-
 
 
 ### Important notes about the checks
