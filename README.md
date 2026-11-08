@@ -1,6 +1,5 @@
 <img align="right" width="200" alt="pg_smartcheck mascot" src="images/pg_smartcheck_mascot.png" />
 
-
 # pg_smartcheck
 
 `pg_smartcheck` is a comprehensive PostgreSQL database health analysis and performance diagnostics utility. It examines database activity, configuration, connection usage, checkpoints, background writer behavior, indexes, large objects, disk usage, table and index bloat, maintenance indicators, and replication status.
