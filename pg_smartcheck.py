@@ -46,7 +46,7 @@
 # Michael Vitale     11/05/2026     Initial development, consolidating pg_report and pg_check.
 # Michael Vitale     11/06/2026     Added more logic and refined it in context of BGWriter.
 # Michael Vitale     11/07/2026     Added toast table analysis. Reuse connections.
-# Michael Vitale     11/08/2026     Added 9 more checks.
+# Michael Vitale     11/08/2026     Added 11 more checks.
 ###############################################################################
 
 import sys
@@ -59,6 +59,8 @@ import math
 import subprocess
 import shutil
 import html
+import re
+import urllib.request
 from datetime import datetime
 from decimal import Decimal
 from subprocess import Popen, PIPE
@@ -2644,6 +2646,184 @@ class maint:
         
 
     ###########################################################
+    def check_kernel_memory(self):
+
+        result = {
+            "check": "kernel_memory",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        if not self.local:
+            result["status"] = "INFO"
+            result["message"] = "Kernel memory check not applicable for remote DB instances."
+            return SUCCESS, result
+
+        if not sys.platform.startswith("linux"):
+            result["status"] = "INFO"
+            result["message"] = "Kernel memory check is only available on local Linux instances."
+            return SUCCESS, result
+
+        details = []
+        warnings = []
+
+        try:
+            with open("/proc/sys/vm/overcommit_memory", "r") as f:
+                overcommit_memory = int(f.read().strip())
+
+            with open("/proc/sys/vm/overcommit_ratio", "r") as f:
+                overcommit_ratio = int(f.read().strip())
+
+            with open("/proc/sys/vm/overcommit_kbytes", "r") as f:
+                overcommit_kbytes = int(f.read().strip())
+
+            details.append("overcommit_memory=%d  overcommit_ratio=%d  overcommit_kbytes=%d" % (overcommit_memory, overcommit_ratio, overcommit_kbytes))
+
+        except (OSError, ValueError) as e:
+            result["status"] = "INFO"
+            result["message"] = "Unable to retrieve Linux memory overcommit settings: %s" % e
+            return SUCCESS, result
+
+        if overcommit_memory == 0:
+            details.append("Memory overcommit uses heuristic mode.")
+
+        elif overcommit_memory == 1:
+            warnings.append("Memory overcommit is set to always allow overcommit, increasing system OOM risk.")
+
+        elif overcommit_memory == 2:
+
+            try:
+                meminfo = {}
+
+                with open("/proc/meminfo", "r") as f:
+                    for line in f:
+                        fields = line.split(":", 1)
+
+                        if len(fields) == 2:
+                            values = fields[1].strip().split()
+
+                            if values:
+                                meminfo[fields[0]] = int(values[0])
+
+                commit_limit = meminfo.get("CommitLimit", 0)
+                committed_as = meminfo.get("Committed_AS", 0)
+
+                if commit_limit <= 0:
+                    raise ValueError("CommitLimit is unavailable.")
+
+                utilization = committed_as / commit_limit * 100
+
+                details.append("Strict commitment accounting: %.1f%% utilized  CommitLimit=%d MB  Committed_AS=%d MB" % (utilization, commit_limit // 1024, committed_as // 1024))
+
+                if utilization >= 90:
+                    warnings.append("Memory commitment is approaching the strict overcommit limit: %.1f%% utilized." % utilization)
+
+            except (OSError, ValueError) as e:
+                details.append("Unable to calculate strict commitment utilization: %s" % e)
+
+        else:
+            details.append("Unrecognized vm.overcommit_memory value: %d" % overcommit_memory)
+
+        # Check PostgreSQL postmaster OOM protection.
+
+        try:
+            pidfile = os.path.join(self.datadir, "postmaster.pid")
+
+            with open(pidfile, "r") as f:
+                postmaster_pid = int(f.readline().strip())
+
+            postmaster_path = "/proc/%d/oom_score_adj" % postmaster_pid
+
+            with open(postmaster_path, "r") as f:
+                postmaster_oom_score = int(f.read().strip())
+
+            details.append("PostgreSQL postmaster PID=%d  oom_score_adj=%d" % (postmaster_pid, postmaster_oom_score))
+
+            if postmaster_oom_score != -1000:
+                warnings.append("PostgreSQL postmaster is not fully protected from the Linux OOM killer (oom_score_adj=%d, recommended=-1000)." % postmaster_oom_score)
+
+            # Check the current PostgreSQL backend.
+
+            sql = "select pg_backend_pid()"
+            rc, results = self.executesql(sql, True)
+
+            if rc == SUCCESS:
+                backend_pid = int(results.strip())
+
+                with open("/proc/%d/oom_score_adj" % backend_pid, "r") as f:
+                    backend_oom_score = int(f.read().strip())
+
+                details.append("Current PostgreSQL backend PID=%d  oom_score_adj=%d" % (backend_pid, backend_oom_score))
+
+                if backend_oom_score != postmaster_oom_score:
+                    warnings.append("Current PostgreSQL backend OOM adjustment differs from the postmaster. Verify process protection inheritance.")
+
+        except (OSError, ValueError) as e:
+            details.append("Unable to verify PostgreSQL OOM protection: %s" % e)
+
+        # Check cgroup v2 memory limits and OOM events.
+
+        try:
+            with open("/proc/%d/cgroup" % postmaster_pid, "r") as f:
+                cgroup_path = ""
+
+                for line in f:
+                    fields = line.strip().split(":", 2)
+
+                    if len(fields) == 3 and fields[0] == "0":
+                        cgroup_path = fields[2].lstrip("/")
+                        break
+
+            if cgroup_path:
+                cgroup_dir = os.path.join("/sys/fs/cgroup", cgroup_path)
+
+                with open(os.path.join(cgroup_dir, "memory.max"), "r") as f:
+                    memory_max = f.read().strip()
+
+                with open(os.path.join(cgroup_dir, "memory.current"), "r") as f:
+                    memory_current = int(f.read().strip())
+
+                if memory_max != "max":
+                    memory_limit = int(memory_max)
+                    utilization = memory_current / memory_limit * 100 if memory_limit > 0 else 0
+
+                    details.append("PostgreSQL cgroup memory: %.1f%% utilized  current=%d MB  limit=%d MB" % (utilization, memory_current // 1048576, memory_limit // 1048576))
+
+                    if utilization >= 90:
+                        warnings.append("PostgreSQL cgroup memory usage is approaching its configured limit: %.1f%%." % utilization)
+                else:
+                    details.append("PostgreSQL cgroup memory limit is unlimited.")
+
+                with open(os.path.join(cgroup_dir, "memory.events"), "r") as f:
+                    events = dict(line.split() for line in f if len(line.split()) == 2)
+
+                oom_events = int(events.get("oom", 0))
+                oom_kill_events = int(events.get("oom_kill", 0))
+
+                details.append("PostgreSQL cgroup OOM events: oom=%d  oom_kill=%d" % (oom_events, oom_kill_events))
+
+                if oom_kill_events > 0:
+                    warnings.append("PostgreSQL cgroup reports %d OOM kill event(s)." % oom_kill_events)
+
+        except (OSError, ValueError):
+            details.append("Cgroup v2 memory limits and OOM events are unavailable.")
+
+        result["details"] = "\n".join(details)
+
+        if warnings:
+            result["status"] = "WARNING"
+            result["count"] = len(warnings)
+            result["message"] = "%d Linux kernel memory/OOM finding(s) require attention." % len(warnings)
+            result["details"] += "\n" + "\n".join(warnings)
+        else:
+            result["message"] = "Linux memory overcommit and PostgreSQL OOM protection checks completed."
+
+        return SUCCESS, result
+        
+        
+    ###########################################################
     def check_unlogged_tables(self):
 
         result = {
@@ -2681,6 +2861,88 @@ class maint:
 
         return SUCCESS, result
         
+
+    ###########################################################
+    def check_version(self):
+
+        result = {
+            "check": "version",
+            "status": "INFO",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        url = "https://www.postgresql.org/support/versioning/"
+
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "pg_smartcheck"})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                page = response.read().decode("utf-8", errors="replace")
+
+            releases = {}
+
+            rows = re.findall(r"<tr\b[^>]*>(.*?)</tr>", page, re.IGNORECASE | re.DOTALL)
+
+            for row in rows:
+                cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.IGNORECASE | re.DOTALL)
+
+                if len(cells) < 5:
+                    continue
+
+                values = [html.unescape(re.sub(r"<[^>]+>", "", cell)).strip() for cell in cells]
+
+                version = values[0]
+                current_minor = values[1]
+                supported = values[2].lower() == "yes"
+
+                if re.match(r"^\d+(?:\.\d+)?$", version):
+                    releases[version] = {
+                        "minor": current_minor,
+                        "supported": supported
+                    }
+
+            if not releases:
+                raise ValueError("No PostgreSQL release information found.")
+
+            supported_versions = [Decimal(version) for version, info in releases.items() if info["supported"]]
+
+            if not supported_versions:
+                raise ValueError("No supported PostgreSQL releases found.")
+
+            latest_major = max(supported_versions)
+            installed_major = str(self.pgversionmajor)
+            installed_version = self.pgversionminor
+
+            if installed_major not in releases:
+                result["message"] = "Unable to match PostgreSQL version %s against the official release information." % installed_version
+                return SUCCESS, result
+
+            release = releases[installed_major]
+            latest_minor = release["minor"]
+
+            messages = []
+
+            if self.pgversionmajor < latest_major:
+                messages.append("PostgreSQL major version %s is behind the latest stable major version %s." % (installed_major, latest_major))
+
+            if not release["supported"]:
+                messages.append("PostgreSQL %s is no longer supported." % installed_major)
+
+            if installed_version != latest_minor:
+                messages.append("PostgreSQL %s is behind the latest minor release for its major version: %s." % (installed_version, latest_minor))
+
+            if messages:
+                result["message"] = "\n".join(messages)
+                result["count"] = len(messages)
+            else:
+                result["message"] = "PostgreSQL version %s is current." % installed_version
+
+        except Exception as e:
+            result["message"] = "Unable to verify PostgreSQL release status: %s" % str(e)
+
+        return SUCCESS, result
+        
         
     ###########################################################
     def run_checks(self):
@@ -2688,6 +2950,8 @@ class maint:
         results = []
 
         checks = [
+            self.check_version,
+            self.check_kernel_memory,
             self.check_load,
             self.check_datadirusage,
             self.check_configrecommendations,
@@ -2734,6 +2998,22 @@ class maint:
             else:
                 marker = MARK_OK
 
+            details_hidden = (
+                not self.verbose
+                and bool(result["details"].strip())
+                and result["check"] in (
+                    "bloat_tables", "bloat_indexes", "bloat_toast",
+                    "maintenance_candidates", "unusedindexes", "unlogged_tables",
+                    "checkpoints", "bgwriter", "replication", "replicationslots",
+                    "xid_multixact", "sequence_exhaustion", "prepared_transactions",
+                    "invalid_indexes", "wal_archiving", "replication_configuration",
+                    "foreign_key_indexes", "kernel_memory"
+                )
+            )
+
+            if details_hidden and result["status"] == "WARNING":
+                result["message"] += " Run in verbose mode to see details."
+
             if result["check"] == "waitslocks" and result["status"] == "WARNING" and result["details"].strip():
                 details = result["details"].splitlines()
                 print(marker + result["message"] + "  " + details[0])
@@ -2747,7 +3027,7 @@ class maint:
 
                 if result.get("notice"):
                     print(MARK_INFO + result["notice"])
-                    
+
                 if result["details"]:
                     if result["check"] in ("bloat_tables", "bloat_indexes", "bloat_toast", "maintenance_candidates", "unusedindexes", "unlogged_tables"):
                         if self.verbose:
@@ -2756,16 +3036,13 @@ class maint:
                     else:
                         for detail in result["details"].splitlines():
                             if result["check"] in ("checkpoints", "bgwriter", "replication", "replicationslots", "xid_multixact", "sequence_exhaustion", "prepared_transactions",
-			                           "invalid_indexes", "wal_archiving", "replication_configuration", "foreign_key_indexes"):
-                            
+                                                   "invalid_indexes", "wal_archiving", "replication_configuration", "foreign_key_indexes", "kernel_memory"):
                                 if self.verbose:
                                     print(MARK_VERB + detail)
                             elif result["status"] == "WARNING":
                                 print(MARK_WARN + detail)
                             else:
-                                print(MARK_INFO + detail)                                
-                                
-                                
+                                print(MARK_INFO + detail)
                                 
             results.append(result)
 
