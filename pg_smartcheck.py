@@ -46,6 +46,7 @@
 # Michael Vitale     11/05/2026     Initial development, consolidating pg_report and pg_check.
 # Michael Vitale     11/06/2026     Added more logic and refined it in context of BGWriter.
 # Michael Vitale     11/07/2026     Added toast table analysis. Reuse connections.
+# Michael Vitale     11/08/2026     Added 9 more checks.
 ###############################################################################
 
 import sys
@@ -78,10 +79,10 @@ TOOLONG   = 3
 HIGHLOAD  = 4
 
 DESCRIPTION = "Comprehensive PostgreSQL database health analysis, performance diagnostics, maintenance recommendations, and detailed reporting."
-VERSION     = 1.0
+VERSION     = 1.1
 PROGNAME    = "pg_smartcheck"
-ADATE       = "November 07, 2026"
-PROGDATE    = "2026-11-07"
+ADATE       = "November 08, 2026"
+PROGDATE    = "2026-11-08"
 MARK_OK     = "[ OK ]  "
 MARK_WARN   = "[WARN]  "
 MARK_INFO   = "[INFO]  "
@@ -1646,7 +1647,8 @@ class maint:
             "status": "OK",
             "count": 0,
             "message": "",
-            "details": ""
+            "details": "",
+            "notice": ""
         }
 
         extension_sql = "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_freespacemap')"
@@ -1731,9 +1733,8 @@ class maint:
                 result["status"] = "WARNING"
                 result["message"] = "%d TOAST table(s) have elevated estimated dead-tuple ratios. VACUUM recommended. pg_freespacemap is unavailable; free-space estimates cannot be reported." % vacuum_tables
             else:
-                result["status"] = "INFO"
-                result["message"] = "No elevated TOAST dead-tuple ratios detected. pg_freespacemap is unavailable; using the reduced-information fallback."
-
+                result["message"] = "No elevated TOAST dead-tuple ratios detected."
+                result["notice"] = "pg_freespacemap is unavailable; using the reduced-information fallback."
         return SUCCESS, result
         
         
@@ -2086,6 +2087,600 @@ class maint:
             
         return SUCCESS, result
         
+
+    ###########################################################
+    def check_sequence_exhaustion(self):
+
+        result = {
+            "check": "sequence_exhaustion",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        if self.pgversionmajor < Decimal("10.0"):
+            result["status"] = "INFO"
+            result["message"] = "Sequence exhaustion check requires PostgreSQL 10 or newer."
+            return SUCCESS, result
+
+        sql = "select concat_ws('|', schemaname, sequencename, data_type::text, min_value::text, max_value::text, increment_by::text, case when cycle then 'yes' else 'no' end, coalesce(last_value::text, 'N/A')) from pg_sequences order by schemaname, sequencename"
+
+        rc, results = self.executesql(sql, False)
+
+        if rc != SUCCESS:
+            return rc, "Unable to retrieve sequence information: %s" % results
+
+        if not results.strip():
+            result["message"] = "No sequences found in the current database."
+            return SUCCESS, result
+
+        sequence_count = 0
+        unavailable_count = 0
+        warning_count = 0
+        critical_count = 0
+        details = []
+
+        for line in results.strip().splitlines():
+
+            fields = line.split("|")
+
+            if len(fields) != 8:
+                return ERROR, "Invalid sequence information returned: %s" % line
+
+            schema = fields[0]
+            sequence = fields[1]
+            data_type = fields[2]
+            min_value = int(fields[3])
+            max_value = int(fields[4])
+            increment_by = int(fields[5])
+            cycle = fields[6]
+            last_value = fields[7]
+
+            sequence_count += 1
+
+            if last_value == "N/A":
+                unavailable_count += 1
+                continue
+
+            last_value = int(last_value)
+
+            value_range = max_value - min_value
+
+            if value_range <= 0 or increment_by == 0:
+                return ERROR, "Invalid sequence bounds or increment: %s.%s" % (schema, sequence)
+
+            if increment_by > 0:
+                used_pct = (last_value - min_value) / value_range * 100.0
+                remaining = max_value - last_value
+            else:
+                used_pct = (max_value - last_value) / value_range * 100.0
+                remaining = last_value - min_value
+
+            if used_pct < 80.0:
+                continue
+
+            warning_count += 1
+
+            if used_pct >= 95.0:
+                critical_count += 1
+                severity = "CRITICAL"
+            else:
+                severity = "WARNING"
+
+            detail = "%s.%s  type=%s  last_value=%d  remaining=%d  used=%.1f%%  cycle=%s  %s" % (schema, sequence, data_type, last_value, remaining, used_pct, cycle, severity)
+
+            if cycle == "yes":
+                detail += "  CYCLE ENABLED: values may wrap and repeat"
+
+            details.append(detail)
+
+        result["count"] = warning_count
+        result["details"] = "\n".join(details)
+
+        if warning_count:
+            result["status"] = "WARNING"
+            result["message"] = "%d of %d sequence(s) are approaching exhaustion. %d critical (95%% or higher)." % (warning_count, sequence_count, critical_count)
+        else:
+            result["message"] = "No sequence exhaustion risks detected across %d sequence(s)." % sequence_count
+
+        if unavailable_count:
+            result["message"] += " Current values unavailable for %d sequence(s) (unused or insufficient privileges)." % unavailable_count
+
+        return SUCCESS, result
+        
+        
+    ###########################################################
+    def check_replicationslots(self):
+
+        result = {
+            "check": "replicationslots",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        sql = "select pg_is_in_recovery()"
+        rc, results = self.executesql(sql, True)
+
+        if rc != SUCCESS:
+            result["status"] = "INFO"
+            result["message"] = "Replication slot status unavailable: %s" % results
+            return SUCCESS, result
+
+        if results.strip().lower() in ("t", "true"):
+            result["status"] = "INFO"
+            result["message"] = "Replication slot retention check is not applicable on a standby."
+            return SUCCESS, result
+
+        if self.pgversionmajor >= Decimal("13.0"):
+            wal_columns = "coalesce(wal_status, 'N/A'), coalesce(safe_wal_size::text, 'N/A')"
+        else:
+            wal_columns = "'N/A', 'N/A'"
+
+        sql = "select concat_ws('|', slot_name, slot_type, coalesce(database, 'N/A'), case when active then 'active' else 'inactive' end, " \
+              "coalesce(restart_lsn::text, 'N/A'), coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint::text, 'N/A'), " \
+              "coalesce(age(xmin)::text, 'N/A'), coalesce(age(catalog_xmin)::text, 'N/A'), %s, " \
+              "current_setting('autovacuum_freeze_max_age')::bigint::text) from pg_replication_slots order by slot_name" % wal_columns
+
+        rc, results = self.executesql(sql, False)
+
+        if rc != SUCCESS:
+            result["status"] = "INFO"
+            result["message"] = "Unable to retrieve replication slot information: %s" % results
+            return SUCCESS, result
+
+        if not results.strip():
+            result["message"] = "No replication slots found."
+            return SUCCESS, result
+
+        details = []
+        warning_count = 0
+
+        for line in results.strip().splitlines():
+
+            fields = line.split("|")
+
+            if len(fields) != 11:
+                return ERROR, "Invalid replication slot information returned: %s" % line
+
+            slot_name = fields[0]
+            slot_type = fields[1]
+            database = fields[2]
+            active = fields[3]
+            restart_lsn = fields[4]
+            retained_bytes = fields[5]
+            xmin_age = fields[6]
+            catalog_xmin_age = fields[7]
+            wal_status = fields[8]
+            safe_wal_size = fields[9]
+            freeze_max_age = int(fields[10])
+
+            warnings = []
+
+            if wal_status in ("unreserved", "lost", "extended"):
+                warnings.append("wal_status=%s" % wal_status)
+
+            if safe_wal_size != "N/A" and int(safe_wal_size) == 0 and wal_status == "reserved":
+                warnings.append("safe_wal_size=0")
+
+            if xmin_age != "N/A" and int(xmin_age) >= int(freeze_max_age * 0.80):
+                warnings.append("xmin_age=%s approaching freeze limit" % xmin_age)
+
+            if catalog_xmin_age != "N/A" and int(catalog_xmin_age) >= int(freeze_max_age * 0.80):
+                warnings.append("catalog_xmin_age=%s approaching freeze limit" % catalog_xmin_age)
+
+            if warnings:
+                warning_count += 1
+
+            detail = "%s  type=%s  database=%s  active=%s  restart_lsn=%s  retained_bytes=%s  xmin_age=%s  catalog_xmin_age=%s  wal_status=%s  safe_wal_size=%s" % (slot_name, slot_type, database, active, restart_lsn, retained_bytes, xmin_age, catalog_xmin_age, wal_status, safe_wal_size)
+
+            if warnings:
+                detail += "  WARNING: " + "; ".join(warnings)
+
+            details.append(detail)
+
+        result["count"] = len(details)
+        result["details"] = "\n".join(details)
+
+        if warning_count:
+            result["status"] = "WARNING"
+            result["message"] = "%d replication slot(s) found; %d require attention." % (len(details), warning_count)
+        else:
+            result["message"] = "%d replication slot(s) found. No significant retention or vacuum-horizon risks detected." % len(details)
+
+        return SUCCESS, result        
+
+
+    ###########################################################
+    def check_xid_multixact(self):
+
+        result = {
+            "check": "xid_multixact",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        if self.pgversionmajor < Decimal("10.0"):
+            result["status"] = "INFO"
+            result["message"] = "XID/MultiXact health check requires PostgreSQL 10 or newer."
+            return SUCCESS, result
+
+        sql = "select concat_ws('|', datname, age(datfrozenxid)::text, current_setting('autovacuum_freeze_max_age'), round(age(datfrozenxid)::numeric * 100 / current_setting('autovacuum_freeze_max_age')::numeric, 1)::text, mxid_age(datminmxid)::text, current_setting('autovacuum_multixact_freeze_max_age'), round(mxid_age(datminmxid)::numeric * 100 / current_setting('autovacuum_multixact_freeze_max_age')::numeric, 1)::text) from pg_database where datname <> 'template0' order by greatest(age(datfrozenxid)::numeric / current_setting('autovacuum_freeze_max_age')::numeric, mxid_age(datminmxid)::numeric / current_setting('autovacuum_multixact_freeze_max_age')::numeric) desc"
+
+        rc, results = self.executesql(sql, True)
+        if rc != SUCCESS:
+            return rc, "Unable to get XID/MultiXact database ages: %s" % results
+
+        details = []
+        warning_count = 0
+        critical_count = 0
+
+        for line in results.strip().splitlines():
+
+            fields = line.split("|")
+
+            if len(fields) != 7:
+                return ERROR, "Invalid XID/MultiXact information returned: %s" % line
+
+            try:
+                database = fields[0]
+                xid_age = int(fields[1])
+                xid_limit = int(fields[2])
+                xid_pct = float(fields[3])
+                mxid_age_value = int(fields[4])
+                mxid_limit = int(fields[5])
+                mxid_pct = float(fields[6])
+
+            except (ValueError, TypeError):
+                return ERROR, "Invalid XID/MultiXact values returned: %s" % line
+
+            warnings = []
+
+            if xid_pct >= 95.0:
+                warnings.append("XID CRITICAL")
+                critical_count += 1
+            elif xid_pct >= 80.0:
+                warnings.append("XID WARNING")
+
+            if mxid_pct >= 95.0:
+                warnings.append("MultiXact CRITICAL")
+                critical_count += 1
+            elif mxid_pct >= 80.0:
+                warnings.append("MultiXact WARNING")
+
+            if warnings:
+                warning_count += 1
+
+            detail = "%s  xid_age=%d/%d (%.1f%%)  multixact_age=%d/%d (%.1f%%)" % (database, xid_age, xid_limit, xid_pct, mxid_age_value, mxid_limit, mxid_pct)
+
+            if warnings:
+                detail += "  WARNING: " + ", ".join(warnings)
+
+            details.append(detail)
+
+        result["count"] = warning_count
+        result["details"] = "\n".join(details)
+
+        if warning_count:
+            result["status"] = "WARNING"
+            result["message"] = "%d database(s) approaching XID/MultiXact freeze limits. %d critical threshold(s) reached (95%% or higher)." % (warning_count, critical_count)
+        else:
+            result["message"] = "XID and MultiXact ages are within configured freeze limits across %d database(s)." % len(details)
+
+        return SUCCESS, result
+
+
+    ###########################################################
+    def check_prepared_transactions(self):
+
+        result = {
+            "check": "prepared_transactions",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        sql = "SELECT count(*), COALESCE(string_agg(format('gid=%s  database=%s  owner=%s  prepared=%s  age=%s', gid, database, owner, prepared, clock_timestamp() - prepared), E'\\n' ORDER BY prepared), '') FROM pg_prepared_xacts"
+
+        rc, results = self.executesql(sql, True)
+        if rc != SUCCESS:
+            result["status"] = "INFO"
+            result["message"] = "Unable to retrieve prepared transaction information: %s" % results
+            return SUCCESS, result
+
+        try:
+            values = results.strip().split("|", 1)
+
+            if len(values) != 2:
+                raise ValueError("Expected two values.")
+
+            prepared_count = int(values[0])
+            prepared_details = values[1]
+
+        except (ValueError, TypeError):
+            return ERROR, "Invalid prepared transaction information returned: %s" % results
+
+        result["count"] = prepared_count
+        result["details"] = prepared_details
+
+        if prepared_count > 0:
+            result["status"] = "WARNING"
+            result["message"] = "%d prepared transaction(s) detected. Review for transactions that may be holding locks or delaying cleanup." % prepared_count
+        else:
+            result["message"] = "No prepared transactions detected."
+
+        return SUCCESS, result        
+
+
+    ###########################################################
+    def check_invalid_indexes(self):
+
+        result = {
+            "check": "invalid_indexes",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        sql = "SELECT count(*) FILTER (WHERE NOT x.indisvalid OR NOT x.indisready), COALESCE(string_agg(format('%I.%I on %I.%I  valid=%s  ready=%s  live=%s  unique=%s  definition=%s', ni.nspname, i.relname, nt.nspname, t.relname, x.indisvalid, x.indisready, x.indislive, x.indisunique, pg_get_indexdef(x.indexrelid)), E'\\n' ORDER BY nt.nspname, t.relname, i.relname) FILTER (WHERE NOT x.indisvalid OR NOT x.indisready), '') FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid JOIN pg_namespace ni ON ni.oid = i.relnamespace JOIN pg_class t ON t.oid = x.indrelid JOIN pg_namespace nt ON nt.oid = t.relnamespace WHERE nt.nspname NOT IN ('pg_catalog','information_schema') AND nt.nspname NOT LIKE 'pg_toast%' AND nt.nspname NOT LIKE 'pg_temp_%'"
+
+        rc, results = self.executesql(sql, True)
+        if rc != SUCCESS:
+            result["status"] = "INFO"
+            result["message"] = "Unable to retrieve index validity information: %s" % results
+            return SUCCESS, result
+
+        try:
+            values = results.strip().split("|", 1)
+
+            if len(values) != 2:
+                raise ValueError("Expected two values.")
+
+            invalid_count = int(values[0])
+            invalid_details = values[1]
+
+        except (ValueError, TypeError):
+            return ERROR, "Invalid index information returned: %s" % results
+
+        result["count"] = invalid_count
+        result["details"] = invalid_details
+
+        if invalid_count > 0:
+            result["status"] = "WARNING"
+            result["message"] = "%d invalid or not-ready index(es) detected. Investigation and possible REINDEX recommended." % invalid_count
+        else:
+            result["message"] = "All user indexes are valid and ready for use."
+
+        return SUCCESS, result
+        
+
+    ###########################################################
+    def check_wal_archiving(self):
+
+        result = {
+            "check": "wal_archiving",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        sql = "SELECT current_setting('archive_mode'), (COALESCE((SELECT setting FROM pg_settings WHERE name = 'archive_command'), '') <> '' OR COALESCE((SELECT setting FROM pg_settings WHERE name = 'archive_library'), '') <> '')::text, archived_count::text, failed_count::text, COALESCE(last_archived_wal, 'N/A'), COALESCE(last_archived_time::text, 'N/A'), COALESCE(last_failed_wal, 'N/A'), COALESCE(last_failed_time::text, 'N/A'), (last_failed_time IS NOT NULL AND (last_archived_time IS NULL OR last_failed_time > last_archived_time))::text, COALESCE(stats_reset::text, 'N/A') FROM pg_stat_archiver"
+
+        rc, results = self.executesql(sql, True)
+        if rc != SUCCESS:
+            result["status"] = "INFO"
+            result["message"] = "Unable to retrieve WAL archiving statistics: %s" % results
+            return SUCCESS, result
+
+        try:
+            values = results.strip().split("|")
+
+            if len(values) != 10:
+                raise ValueError("Expected ten values.")
+
+            archive_mode = values[0]
+            archive_configured = values[1].lower() in ("t", "true")
+            archived_count = int(values[2])
+            failed_count = int(values[3])
+            last_archived_wal = values[4]
+            last_archived_time = values[5]
+            last_failed_wal = values[6]
+            last_failed_time = values[7]
+            unresolved_failure = values[8].lower() in ("t", "true")
+            stats_reset = values[9]
+
+        except (ValueError, TypeError):
+            return ERROR, "Invalid WAL archiving statistics returned: %s" % results
+
+        result["details"] = "archive_mode=%s  archiving_configured=%s  archived_count=%d  failed_count=%d  last_archived_wal=%s  last_archived_time=%s  last_failed_wal=%s  last_failed_time=%s  stats_reset=%s" % (archive_mode, archive_configured, archived_count, failed_count, last_archived_wal, last_archived_time, last_failed_wal, last_failed_time, stats_reset)
+
+        if archive_mode == "off":
+            result["status"] = "INFO"
+            result["message"] = "WAL archiving is disabled (archive_mode=off)."
+        elif not archive_configured:
+            result["status"] = "WARNING"
+            result["count"] = 1
+            result["message"] = "WAL archiving is enabled but neither archive_command nor archive_library is configured."
+        elif unresolved_failure:
+            result["status"] = "WARNING"
+            result["count"] = 1
+            result["message"] = "WAL archiving has unresolved failures. The most recent archive failure has not been followed by a successful archive."
+        elif archived_count == 0 and failed_count == 0:
+            result["status"] = "INFO"
+            result["message"] = "WAL archiving is configured, but no archive activity has been recorded since the statistics reset."
+        elif failed_count > 0:
+            result["message"] = "WAL archiving is operating. Previous archive failures have been followed by successful archives."
+        else:
+            result["message"] = "WAL archiving is configured and no archive failures have been recorded."
+
+        return SUCCESS, result
+
+
+    ###########################################################
+    def check_replication_configuration(self):
+
+        result = {
+            "check": "replication_configuration",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        sql = "SELECT pg_is_in_recovery()::text, current_setting('wal_level'), current_setting('max_wal_senders'), current_setting('max_replication_slots'), current_setting('hot_standby'), current_setting('synchronous_standby_names'), current_setting('wal_sender_timeout'), current_setting('wal_receiver_timeout')"
+
+        rc, results = self.executesql(sql, True)
+        if rc != SUCCESS:
+            result["status"] = "INFO"
+            result["message"] = "Unable to retrieve replication configuration: %s" % results
+            return SUCCESS, result
+
+        try:
+            values = results.strip().split("|")
+
+            if len(values) != 8:
+                raise ValueError("Expected eight values.")
+
+            in_recovery = values[0].lower() in ("t", "true")
+            wal_level = values[1]
+            max_wal_senders = int(values[2])
+            max_replication_slots = int(values[3])
+            hot_standby = values[4]
+            synchronous_standby_names = values[5]
+            wal_sender_timeout = values[6]
+            wal_receiver_timeout = values[7]
+
+        except (ValueError, TypeError):
+            return ERROR, "Invalid replication configuration returned: %s" % results
+
+        role = "standby" if in_recovery else "primary"
+
+        result["details"] = "role=%s  wal_level=%s  max_wal_senders=%d  max_replication_slots=%d  hot_standby=%s  synchronous_standby_names=%s  wal_sender_timeout=%s  wal_receiver_timeout=%s" % (role, wal_level, max_wal_senders, max_replication_slots, hot_standby, synchronous_standby_names or "not configured", wal_sender_timeout, wal_receiver_timeout)
+
+        warnings = []
+
+        if wal_level not in ("replica", "logical"):
+            warnings.append("wal_level must be replica or logical to support streaming replication (current value=%s)." % wal_level)
+
+        if not in_recovery and max_wal_senders <= 0:
+            warnings.append("max_wal_senders is zero; this primary cannot support streaming replication.")
+
+        if warnings:
+            result["status"] = "WARNING"
+            result["count"] = len(warnings)
+            result["message"] = "%d replication configuration issue(s) detected." % len(warnings)
+            result["details"] += "\n" + "\n".join(warnings)
+        else:
+            result["message"] = "Replication configuration supports streaming replication."
+
+            if max_replication_slots == 0:
+                result["details"] += "\nReplication slots are disabled (max_replication_slots=0)."
+
+            if not in_recovery and not synchronous_standby_names:
+                result["details"] += "\nSynchronous replication is not configured; asynchronous replication is permitted."
+
+            if in_recovery and max_wal_senders == 0:
+                result["details"] += "\nCascading replication is disabled (max_wal_senders=0)."
+
+            if in_recovery and hot_standby == "off":
+                result["details"] += "\nHot standby is disabled; read-only queries cannot run during recovery."
+
+        return SUCCESS, result
+        
+
+    ###########################################################
+    def check_foreign_key_indexes(self):
+
+        result = {
+            "check": "foreign_key_indexes",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        if self.pgversionmajor < Decimal("11.0"):
+            result["status"] = "INFO"
+            result["message"] = "Foreign key indexing check requires PostgreSQL 11 or newer."
+            return SUCCESS, result
+
+        sql = "SELECT count(*), COALESCE(string_agg(format('%I.%I  constraint=%I  definition=%s', n.nspname, t.relname, fk.conname, pg_get_constraintdef(fk.oid)), E'\\n' ORDER BY n.nspname, t.relname, fk.conname), '') FROM pg_constraint fk JOIN pg_class t ON t.oid = fk.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace WHERE fk.contype = 'f' AND n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp_%' AND NOT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class ix ON ix.oid = i.indexrelid JOIN pg_am am ON am.oid = ix.relam WHERE i.indrelid = fk.conrelid AND i.indisvalid AND i.indisready AND i.indislive AND i.indpred IS NULL AND i.indexprs IS NULL AND i.indnkeyatts >= cardinality(fk.conkey) AND am.amname = 'btree' AND (SELECT array_agg(k.attnum ORDER BY k.attnum) FROM unnest(i.indkey::smallint[]) WITH ORDINALITY AS k(attnum, ord) WHERE k.ord <= cardinality(fk.conkey)) = (SELECT array_agg(a.attnum ORDER BY a.attnum) FROM unnest(fk.conkey) AS a(attnum)))"
+
+        rc, results = self.executesql(sql, True)
+        if rc != SUCCESS:
+            result["status"] = "INFO"
+            result["message"] = "Unable to retrieve foreign key indexing information: %s" % results
+            return SUCCESS, result
+
+        try:
+            values = results.strip().split("|", 1)
+
+            if len(values) != 2:
+                raise ValueError("Expected two values.")
+
+            missing_count = int(values[0])
+            missing_details = values[1]
+
+        except (ValueError, TypeError):
+            return ERROR, "Invalid foreign key indexing information returned: %s" % results
+
+        result["count"] = missing_count
+        result["details"] = missing_details
+
+        if missing_count > 0:
+            result["status"] = "WARNING"
+            result["message"] = "%d foreign key constraint(s) have no suitable supporting index on the referencing table." % missing_count
+        else:
+            result["message"] = "All foreign key constraints have suitable supporting indexes."
+
+        return SUCCESS, result
+        
+
+    ###########################################################
+    def check_unlogged_tables(self):
+
+        result = {
+            "check": "unlogged_tables",
+            "status": "OK",
+            "count": 0,
+            "message": "",
+            "details": ""
+        }
+
+        sql = "select count(*), coalesce(string_agg(format('%I.%I', n.nspname, c.relname), E'\\n' order by n.nspname, c.relname), '') from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind = 'r' and c.relpersistence = 'u' and n.nspname <> 'information_schema' and n.nspname !~ '^pg_'"
+
+        rc, results = self.executesql(sql, False)
+
+        if rc != SUCCESS:
+            result["status"] = "INFO"
+            result["message"] = "Unable to retrieve unlogged table information: %s" % results
+            return SUCCESS, result
+
+        try:
+            values = results.strip().split("|", 1)
+            table_count = int(values[0])
+            details = values[1] if len(values) > 1 else ""
+        except (ValueError, IndexError):
+            return ERROR, "Invalid unlogged table information returned: %s" % results
+
+        result["count"] = table_count
+        result["details"] = details
+
+        if table_count:
+            result["status"] = "INFO"
+            result["message"] = "%d unlogged table(s) detected. Their data is not WAL-logged, is not replicated to physical standbys, and is truncated after a crash." % table_count
+        else:
+            result["message"] = "No unlogged tables detected."
+
+        return SUCCESS, result
+        
         
     ###########################################################
     def run_checks(self):
@@ -2109,12 +2704,21 @@ class maint:
             self.check_checkpoints,
             self.check_bgwriter,
             self.check_unusedindexes,
+            self.check_invalid_indexes,
+            self.check_foreign_key_indexes,
             self.check_orphanedlo,
             self.check_bloat_tables,
             self.check_bloat_indexes,
             self.check_maintenance_candidates,
             self.check_bloat_toast,
-            self.check_replication
+            self.check_xid_multixact,
+            self.check_wal_archiving,
+            self.check_sequence_exhaustion,
+            self.check_prepared_transactions,
+            self.check_unlogged_tables,
+            self.check_replication_configuration,
+            self.check_replication,
+            self.check_replicationslots
         ]        
         
         for check in checks:
@@ -2139,22 +2743,29 @@ class maint:
                         print(MARK_VERB + detail)
             else:
                 for message in result["message"].splitlines():
-                    print(marker + message)                
+                    print(marker + message)
 
+                if result.get("notice"):
+                    print(MARK_INFO + result["notice"])
+                    
                 if result["details"]:
-                    if result["check"] in ("bloat_tables", "bloat_indexes", "bloat_toast", "maintenance_candidates", "unusedindexes"):
+                    if result["check"] in ("bloat_tables", "bloat_indexes", "bloat_toast", "maintenance_candidates", "unusedindexes", "unlogged_tables"):
                         if self.verbose:
                             for detail in result["details"].splitlines():
                                 print(MARK_VERB + detail)
                     else:
                         for detail in result["details"].splitlines():
-                            if result["check"] in ("checkpoints", "bgwriter", "replication"):
+                            if result["check"] in ("checkpoints", "bgwriter", "replication", "replicationslots", "xid_multixact", "sequence_exhaustion", "prepared_transactions",
+			                           "invalid_indexes", "wal_archiving", "replication_configuration", "foreign_key_indexes"):
+                            
                                 if self.verbose:
                                     print(MARK_VERB + detail)
                             elif result["status"] == "WARNING":
                                 print(MARK_WARN + detail)
                             else:
-                                print(MARK_INFO + detail)
+                                print(MARK_INFO + detail)                                
+                                
+                                
                                 
             results.append(result)
 
@@ -2389,6 +3000,8 @@ class maint:
 
             check_name = html.escape(check.replace("_", " ").title())
             message_text = html.escape(str(message))
+            if result.get("notice"):
+                message_text += "<br><span class='info'>%s</span>" % html.escape(str(result["notice"]))            
 
             detail_html = ""
 
