@@ -45,6 +45,8 @@ The following checks are performed by `pg_smartcheck`.
 
 | Check | Description |
 |---|---|
+| PostgreSQL version | Compares the installed PostgreSQL major and minor versions with the latest stable releases. Identifies outdated or unsupported PostgreSQL versions. |
+| Linux kernel memory/OOM | Examines Linux memory overcommit settings, PostgreSQL OOM protection, cgroup memory limits, and OOM events. Available only on local Linux hosts. |
 | Waits and locks | Identifies active queries waiting on events, excluding `DataFileRead`, when their wait duration exceeds the configured threshold. Reports waiting query information and blocking relationships when available. |
 | Idle in transaction | Identifies sessions that have remained `idle in transaction` longer than the configured number of minutes. |
 | Idle connections | Identifies idle client connections that have remained inactive longer than the configured threshold. |
